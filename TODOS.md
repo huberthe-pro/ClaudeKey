@@ -13,3 +13,10 @@
 **Context:** Claude Code 的输出格式不是稳定 API。可能的替代方案：降级为"快速连按 Accept"模式（按住 Accept 键时以 500ms 间隔重复发送，松开停止）。
 **Depends on:** v0.1 完成后，进入 v0.2 前做 spike。
 **Added:** 2026-03-27 by /plan-eng-review
+
+## v0.2: Local Whisper STT (whisper.cpp)
+**What:** 用本地 whisper.cpp 替换 Apple SFSpeechRecognizer，提升技术术语识别准确率。
+**Why:** Apple Speech 对编程术语识别差（kubectl, nginx, middleware 等）。whisper.cpp 完全离线免费，对技术语音准确率高得多。
+**Context:** macOS app 录音完成后调 whisper.cpp CLI: `whisper-cli -m ggml-base.en.bin -f audio.wav`，解析 stdout 拿文字。约 200ms 延迟（base 模型）。用户需 `brew install whisper-cpp`。v0.3 可考虑 C API 直接集成减少延迟。
+**Depends on:** v0.1 语音验证通过（确认语音是高价值功能后再优化）。
+**Added:** 2026-03-27
