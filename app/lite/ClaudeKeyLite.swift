@@ -1,11 +1,11 @@
 /**
- ClaudeKey Soft v0.2 — Agentic Coding Control Panel
+ ClaudeKey Lite — Agentic Coding Control Panel (Lite Edition)
 
- NSPanel + .nonActivatingPanel: clicks NEVER steal focus from iTerm.
- Shows real-time Claude Code status, activity log, and controls.
+ 6 buttons + LED status bar + context/rate bars + activity log.
+ Simulates the Lite hardware: 6 Cherry MX keys + WS2812B LED strip.
 
- Build:  cd app && ./build-soft.sh
- Run:    ./ClaudeKeySoft
+ Build:  cd app/lite && ./build.sh
+ Run:    ./ClaudeKeyLite
 */
 
 import AppKit

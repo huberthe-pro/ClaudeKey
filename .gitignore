@@ -18,3 +18,5 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+app/lite/ClaudeKeyLite
+app/pro/ClaudeKeyPro

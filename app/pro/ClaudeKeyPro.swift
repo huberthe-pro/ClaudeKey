@@ -1,11 +1,12 @@
 /**
- ClaudeKey Soft v0.2 — Agentic Coding Control Panel
+ ClaudeKey Pro — Agentic Coding Control Panel (Pro Edition)
 
- NSPanel + .nonActivatingPanel: clicks NEVER steal focus from iTerm.
- Shows real-time Claude Code status, activity log, and controls.
+ Extended panel with TFT display preview, rotary encoder simulation,
+ and additional shortcut buttons. Simulates the Pro hardware:
+ 6 core keys + extra shortcuts + rotary encoder + ST7789 1.3" TFT.
 
- Build:  cd app && ./build-soft.sh
- Run:    ./ClaudeKeySoft
+ Build:  cd app/pro && ./build.sh
+ Run:    ./ClaudeKeyPro
 */
 
 import AppKit
@@ -18,45 +19,23 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recorder: AVAudioRecorder?
     private var startTime: Date?
-    private(set) var isListening = false
-    var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
-    var onError: ((String) -> Void)?
+    private let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent("claudekey-stt.wav")
+
+    var isListening = false
     var onResult: ((String) -> Void)?
-
-    private var tempFileURL: URL {
-        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claudekey_ptt.wav")
-    }
-
-    override init() {
-        super.init()
-        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    }
+    var onError: ((String) -> Void)?
 
     func requestPermission(completion: @escaping (Bool) -> Void) {
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         SFSpeechRecognizer.requestAuthorization { status in
-            DispatchQueue.main.async {
-                self.authStatus = status
-                if status != .authorized {
-                    self.onError?("Speech permission denied")
-                }
-                completion(status == .authorized)
-            }
+            DispatchQueue.main.async { completion(status == .authorized) }
         }
     }
 
     func startRecording() -> Bool {
-        guard authStatus == .authorized else {
-            onError?("Speech not authorized")
-            return false
-        }
-        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            onError?("Speech recognizer unavailable")
-            return false
-        }
-
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: 16000.0,
+            AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
@@ -147,6 +126,138 @@ class NonActivatingButton: NSButton {
 class ControlPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+// ── TFT DISPLAY VIEW (simulates ST7789 240x240) ───────
+class TFTDisplayView: NSView {
+    var contextPercent: Int = 0
+    var rate5h: Int = 0
+    var rate7d: Int = 0
+    var model: String = "—"
+    var status: String = "Ready"
+    var costStr: String = "$0.00"
+    var durationStr: String = "0s"
+    var linesStr: String = "+0/-0"
+    var activity: String = ""
+    var needsAttention: Bool = false
+    var encoderValue: String = ""
+
+    override func draw(_ dirtyRect: NSRect) {
+        let ctx = NSGraphicsContext.current!.cgContext
+        let w = bounds.width
+        let h = bounds.height
+
+        // TFT background — dark with subtle border
+        ctx.setFillColor(NSColor(white: 0.06, alpha: 1).cgColor)
+        let path = CGPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), cornerWidth: 8, cornerHeight: 8, transform: nil)
+        ctx.addPath(path)
+        ctx.fillPath()
+
+        ctx.setStrokeColor(NSColor(white: 0.2, alpha: 1).cgColor)
+        ctx.setLineWidth(1)
+        ctx.addPath(path)
+        ctx.strokePath()
+
+        let pad: CGFloat = 10
+        let usableW = w - pad * 2
+        var y = h - pad - 2
+
+        // ── Row 1: Model + Status ──
+        let statusColor = needsAttention ? NSColor.systemYellow : NSColor.systemGreen
+        drawText(ctx, model, x: pad, y: y, size: 11, weight: .bold, color: .white)
+        let statusW = measureText(status, size: 10)
+        drawText(ctx, status, x: w - pad - statusW, y: y, size: 10, weight: .semibold, color: statusColor)
+        y -= 18
+
+        // ── Row 2: Context bar ──
+        drawText(ctx, "CTX", x: pad, y: y, size: 8, weight: .bold, color: NSColor(white: 0.5, alpha: 1))
+        let ctxPctStr = "\(contextPercent)%"
+        let pctW = measureText(ctxPctStr, size: 9)
+        drawText(ctx, ctxPctStr, x: w - pad - pctW, y: y, size: 9, weight: .bold, color: barColor(contextPercent))
+
+        y -= 3
+        let barH: CGFloat = 6
+        y -= barH
+        drawBar(ctx, x: pad, y: y, width: usableW, height: barH, percent: contextPercent, color: barColor(contextPercent))
+        y -= 10
+
+        // ── Row 3: Rate limits ──
+        drawText(ctx, "5h:\(rate5h)%", x: pad, y: y, size: 8, weight: .regular, color: barColor(rate5h))
+        let r7str = "7d:\(rate7d)%"
+        let r7w = measureText(r7str, size: 8)
+        drawText(ctx, r7str, x: w - pad - r7w, y: y, size: 8, weight: .regular, color: barColor(rate7d))
+        y -= 3
+        y -= barH
+        let halfW = (usableW - 4) / 2
+        drawBar(ctx, x: pad, y: y, width: halfW, height: barH, percent: rate5h, color: barColor(rate5h))
+        drawBar(ctx, x: pad + halfW + 4, y: y, width: halfW, height: barH, percent: rate7d, color: barColor(rate7d))
+        y -= 10
+
+        // ── Row 4: Cost / Duration / Lines ──
+        let statsStr = "\(costStr)  \(durationStr)  \(linesStr)"
+        drawText(ctx, statsStr, x: pad, y: y, size: 8, weight: .regular, color: NSColor(white: 0.55, alpha: 1))
+        y -= 14
+
+        // ── Divider ──
+        ctx.setStrokeColor(NSColor(white: 0.2, alpha: 1).cgColor)
+        ctx.move(to: CGPoint(x: pad, y: y))
+        ctx.addLine(to: CGPoint(x: w - pad, y: y))
+        ctx.strokePath()
+        y -= 10
+
+        // ── Row 5: Activity ──
+        if !activity.isEmpty {
+            let actColor = needsAttention ? NSColor.systemYellow : NSColor.systemCyan
+            drawText(ctx, activity, x: pad, y: y, size: 9, weight: .regular, color: actColor, maxWidth: usableW)
+        }
+
+        // ── Encoder value (bottom-right) ──
+        if !encoderValue.isEmpty {
+            let evW = measureText(encoderValue, size: 8)
+            drawText(ctx, encoderValue, x: w - pad - evW, y: pad, size: 8, weight: .regular, color: NSColor(white: 0.4, alpha: 1))
+        }
+    }
+
+    func drawText(_ ctx: CGContext, _ text: String, x: CGFloat, y: CGFloat,
+                  size: CGFloat, weight: NSFont.Weight, color: NSColor, maxWidth: CGFloat = 0) {
+        let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let str = NSAttributedString(string: text, attributes: attrs)
+        str.draw(at: NSPoint(x: x, y: y - size - 2))
+    }
+
+    func measureText(_ text: String, size: CGFloat) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        return (text as NSString).size(withAttributes: attrs).width
+    }
+
+    func drawBar(_ ctx: CGContext, x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat,
+                 percent: Int, color: NSColor) {
+        // Background
+        let bgPath = CGPath(roundedRect: CGRect(x: x, y: y, width: width, height: height),
+                            cornerWidth: height/2, cornerHeight: height/2, transform: nil)
+        ctx.setFillColor(NSColor(white: 0.18, alpha: 1).cgColor)
+        ctx.addPath(bgPath)
+        ctx.fillPath()
+
+        // Fill
+        let fillW = width * CGFloat(min(percent, 100)) / 100
+        if fillW > 0 {
+            let fillPath = CGPath(roundedRect: CGRect(x: x, y: y, width: fillW, height: height),
+                                  cornerWidth: height/2, cornerHeight: height/2, transform: nil)
+            ctx.setFillColor(color.cgColor)
+            ctx.addPath(fillPath)
+            ctx.fillPath()
+        }
+    }
+
+    func barColor(_ percent: Int) -> NSColor {
+        if percent < 25 { return .systemGreen }
+        if percent < 50 { return .systemBlue }
+        if percent < 75 { return .systemYellow }
+        return .systemRed
+    }
 }
 
 // ── CLAUDE STATUS ──────────────────────────────────────
@@ -242,21 +353,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var modelLabel: NSTextField!
     var pttButton: NonActivatingButton!
     var acceptButton: NonActivatingButton!
+    var alwaysAcceptButton: NonActivatingButton!
 
-    // Context section
-    var ctxBarView: NSView!
-    var ctxBarFill: NSView!
-    var ctxLabel: NSTextField!
-
-    // Rate limit bars
-    var rate5hBar: NSView!
-    var rate5hFill: NSView!
-    var rate7dBar: NSView!
-    var rate7dFill: NSView!
-    var rateLabel: NSTextField!
-
-    // Stats
-    var statsLabel: NSTextField!
+    // TFT display preview
+    var tftView: TFTDisplayView!
 
     // Activity log
     var logView: NSScrollView!
@@ -264,15 +364,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var activityLog: [(Date, String, NSColor)] = []
     let maxLogEntries = 100
 
+    // Encoder simulation
+    var encoderValue: Int = 0
+
     var pollTimer: Timer?
     var blinkState = false
     var lastActivity = ""
     var alwaysAccept = false
     var alwaysAcceptCount = 0
-    var alwaysAcceptButton: NonActivatingButton!
 
-    let panelW: CGFloat = 360
-    let panelH: CGFloat = 480
+    let panelW: CGFloat = 420
+    let panelH: CGFloat = 620
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -302,21 +404,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         checkHookStatus()
-        logActivity("ClaudeKey Soft ready", color: .systemGreen)
+        logActivity("ClaudeKey Pro ready", color: .systemGreen)
     }
 
     func checkHookStatus() {
-        // Resolve project root from the binary's location (app/ClaudeKeySoft)
         let binaryPath = ProcessInfo.processInfo.arguments[0]
         let binaryURL = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath()
-        let projectRoot = binaryURL.deletingLastPathComponent().deletingLastPathComponent().path
+        let projectRoot = binaryURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
         let hookScript = projectRoot + "/scripts/claude-status-hook"
         let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
 
-        // Check hook script exists and is executable
         let fm = FileManager.default
         guard fm.fileExists(atPath: hookScript) else {
-            logActivity("Hook script missing: scripts/claude-status-hook", color: .systemRed)
+            logActivity("Hook script missing", color: .systemRed)
             return
         }
         guard fm.isExecutableFile(atPath: hookScript) else {
@@ -324,21 +424,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Check settings.json links to our hook
         guard let data = fm.contents(atPath: settingsPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let statusLine = json["statusLine"] as? [String: Any],
               let command = statusLine["command"] as? String else {
             logActivity("Hook not configured in settings.json", color: .systemOrange)
-            logActivity("  Set statusLine.command → claude-status-hook", color: .systemOrange)
             return
         }
 
         if command.contains("claude-status-hook") {
-            logActivity("Status hook linked ✓", color: .systemGreen)
+            logActivity("Status hook linked", color: .systemGreen)
         } else {
             logActivity("Hook mismatch: \(command)", color: .systemOrange)
-            logActivity("  Expected: claude-status-hook", color: .systemOrange)
         }
     }
 
@@ -351,7 +448,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered, defer: false
         )
-        panel.title = "ClaudeKey"
+        panel.title = "ClaudeKey Pro"
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
@@ -359,21 +456,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isMovableByWindowBackground = true
         panel.titlebarAppearsTransparent = true
         panel.backgroundColor = NSColor(white: 0.12, alpha: 0.97)
-        panel.minSize = NSSize(width: 300, height: 380)
+        panel.minSize = NSSize(width: 360, height: 500)
 
         let cv = panel.contentView!
         let pad: CGFloat = 10
-        let w = panelW - pad * 2  // usable width
-
-        // Layout top-down: y starts at top of content view and decreases
-        // Content view origin is bottom-left, so we compute from top
+        let w = panelW - pad * 2
         let contentH = cv.frame.height
         var y = contentH
 
         // ── Header ──
-        y -= 6  // top padding
+        y -= 6
         y -= 18
-        headerLabel = makeLabel("ClaudeKey", size: 13, weight: .bold, color: .white)
+        headerLabel = makeLabel("ClaudeKey Pro", size: 14, weight: .bold, color: .white)
         headerLabel.frame = NSRect(x: pad, y: y, width: w, height: 18)
         cv.addSubview(headerLabel)
 
@@ -382,9 +476,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         modelLabel.frame = NSRect(x: pad, y: y, width: w, height: 14)
         cv.addSubview(modelLabel)
 
-        // ── Buttons ──
+        // ── TFT Display Preview ──
+        y -= 10
+        let tftH: CGFloat = 140
+        y -= tftH
+        tftView = TFTDisplayView(frame: NSRect(x: pad, y: y, width: w, height: tftH))
+        tftView.wantsLayer = true
+        cv.addSubview(tftView)
+
+        // ── Core Buttons (2 rows x 3) ──
         y -= 8
-        let btnDefs: [(String, Selector, NSColor)] = [
+        let coreBtnDefs: [(String, Selector, NSColor)] = [
             ("🎙 PTT",     #selector(pttToggle),       NSColor(white: 0.28, alpha: 1)),
             ("✓ Accept",   #selector(doAccept),         NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1)),
             ("✗ Reject",   #selector(doReject),         NSColor(red: 0.3, green: 0.15, blue: 0.15, alpha: 1)),
@@ -394,13 +496,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         let btnGap: CGFloat = 5
         let btnW = (w - btnGap * 2) / 3
-        let btnH: CGFloat = 36
+        let btnH: CGFloat = 34
 
-        for (i, (title, action, bgColor)) in btnDefs.enumerated() {
+        for (i, (title, action, bgColor)) in coreBtnDefs.enumerated() {
             let col = i % 3
             let row = i / 3
             let bx = pad + CGFloat(col) * (btnW + btnGap)
-            let by = y - CGFloat(row + 1) * btnH - CGFloat(row) * 4  // row+1 because y is top edge
+            let by = y - CGFloat(row + 1) * btnH - CGFloat(row) * 4
 
             let btn = NonActivatingButton(frame: NSRect(x: bx, y: by, width: btnW, height: btnH))
             btn.wantsLayer = true
@@ -409,7 +511,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             btn.isBordered = false
             btn.attributedTitle = NSAttributedString(string: title,
                 attributes: [.foregroundColor: NSColor.white,
-                             .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+                             .font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
             btn.onPress = { [weak self] in NSApp.sendAction(action, to: self, from: btn) }
             cv.addSubview(btn)
 
@@ -417,69 +519,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if title.contains("Accept") { acceptButton = btn }
             if title.contains("Always") { alwaysAcceptButton = btn }
         }
-        y -= btnH * 2 + 4 + 6  // 2 rows + gap + spacing
+        y -= btnH * 2 + 4 + 6
 
-        // ── Divider 1 ──
+        // ── Extra Shortcut Buttons (Pro only) ──
         y -= 4
-        addDivider(cv, y: y)
+        let extraBtnDefs: [(String, Selector, NSColor)] = [
+            ("⌫ Undo",      #selector(doUndo),       NSColor(white: 0.22, alpha: 1)),
+            ("⏹ Interrupt",  #selector(doInterrupt),  NSColor(red: 0.25, green: 0.12, blue: 0.12, alpha: 1)),
+            ("⇥ Tab",        #selector(doTab),        NSColor(white: 0.22, alpha: 1)),
+            ("📋 Paste",     #selector(doPaste),      NSColor(white: 0.22, alpha: 1)),
+        ]
+        let extraW = (w - btnGap * 3) / 4
+        let extraH: CGFloat = 28
+        y -= extraH
+        for (i, (title, action, bgColor)) in extraBtnDefs.enumerated() {
+            let bx = pad + CGFloat(i) * (extraW + btnGap)
+            let btn = NonActivatingButton(frame: NSRect(x: bx, y: y, width: extraW, height: extraH))
+            btn.wantsLayer = true
+            btn.layer?.backgroundColor = bgColor.cgColor
+            btn.layer?.cornerRadius = 5
+            btn.isBordered = false
+            btn.attributedTitle = NSAttributedString(string: title,
+                attributes: [.foregroundColor: NSColor(white: 0.8, alpha: 1),
+                             .font: NSFont.systemFont(ofSize: 10, weight: .medium)])
+            btn.onPress = { [weak self] in NSApp.sendAction(action, to: self, from: btn) }
+            cv.addSubview(btn)
+        }
+
+        // ── Rotary Encoder Simulator ──
         y -= 8
+        let encoderH: CGFloat = 28
+        y -= encoderH
+        let encLabel = makeLabel("ENCODER", size: 8, weight: .bold, color: NSColor(white: 0.4, alpha: 1))
+        encLabel.frame = NSRect(x: pad, y: y + 7, width: 55, height: 12)
+        cv.addSubview(encLabel)
 
-        // ── CONTEXT ──
-        y -= 12
-        let ctxLbl = makeLabel("CONTEXT", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
-        ctxLbl.frame = NSRect(x: pad, y: y, width: 60, height: 12)
-        cv.addSubview(ctxLbl)
+        let encLeft = NonActivatingButton(frame: NSRect(x: pad + 60, y: y, width: 50, height: encoderH))
+        encLeft.wantsLayer = true
+        encLeft.layer?.backgroundColor = NSColor(white: 0.2, alpha: 1).cgColor
+        encLeft.layer?.cornerRadius = 14
+        encLeft.isBordered = false
+        encLeft.attributedTitle = NSAttributedString(string: "◀",
+            attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 14)])
+        encLeft.onPress = { [weak self] in self?.encoderTurn(-1) }
+        cv.addSubview(encLeft)
 
-        ctxLabel = makeLabel("—", size: 10, weight: .bold, color: .systemGreen)
-        ctxLabel.frame = NSRect(x: pad + 60, y: y, width: w - 60, height: 12)
-        ctxLabel.alignment = .right
-        cv.addSubview(ctxLabel)
+        let encPress = NonActivatingButton(frame: NSRect(x: pad + 115, y: y, width: 60, height: encoderH))
+        encPress.wantsLayer = true
+        encPress.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+        encPress.layer?.cornerRadius = 14
+        encPress.isBordered = false
+        encPress.attributedTitle = NSAttributedString(string: "● Press",
+            attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 10)])
+        encPress.onPress = { [weak self] in self?.encoderPress() }
+        cv.addSubview(encPress)
 
-        y -= 4
-        y -= 8
-        ctxBarView = NSView(frame: NSRect(x: pad, y: y, width: w, height: 8))
-        ctxBarView.wantsLayer = true
-        ctxBarView.layer?.backgroundColor = NSColor(white: 0.22, alpha: 1).cgColor
-        ctxBarView.layer?.cornerRadius = 4
-        cv.addSubview(ctxBarView)
+        let encRight = NonActivatingButton(frame: NSRect(x: pad + 180, y: y, width: 50, height: encoderH))
+        encRight.wantsLayer = true
+        encRight.layer?.backgroundColor = NSColor(white: 0.2, alpha: 1).cgColor
+        encRight.layer?.cornerRadius = 14
+        encRight.isBordered = false
+        encRight.attributedTitle = NSAttributedString(string: "▶",
+            attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 14)])
+        encRight.onPress = { [weak self] in self?.encoderTurn(1) }
+        cv.addSubview(encRight)
 
-        ctxBarFill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 8))
-        ctxBarFill.wantsLayer = true
-        ctxBarFill.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        ctxBarFill.layer?.cornerRadius = 4
-        ctxBarView.addSubview(ctxBarFill)
-
-        // ── RATE LIMITS ──
-        y -= 12
-        y -= 12
-        let rateLbl = makeLabel("RATE", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
-        rateLbl.frame = NSRect(x: pad, y: y, width: 40, height: 12)
-        cv.addSubview(rateLbl)
-
-        rateLabel = makeLabel("5h: —  |  7d: —", size: 10, weight: .regular, color: NSColor(white: 0.6, alpha: 1))
-        rateLabel.frame = NSRect(x: pad + 40, y: y, width: w - 40, height: 12)
-        rateLabel.alignment = .right
-        cv.addSubview(rateLabel)
-
-        y -= 4
-        y -= 6
-        let halfW = (w - 5) / 2
-        rate5hBar = makeBar(x: pad, y: y, width: halfW)
-        cv.addSubview(rate5hBar)
-        rate5hFill = rate5hBar.subviews.first!
-
-        rate7dBar = makeBar(x: pad + halfW + 5, y: y, width: halfW)
-        cv.addSubview(rate7dBar)
-        rate7dFill = rate7dBar.subviews.first!
-
-        // ── Stats ──
-        y -= 10
-        y -= 12
-        statsLabel = makeLabel("", size: 9, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
-        statsLabel.frame = NSRect(x: pad, y: y, width: w, height: 12)
-        cv.addSubview(statsLabel)
-
-        // ── Divider 2 ──
+        // ── Divider ──
         y -= 6
         addDivider(cv, y: y)
         y -= 6
@@ -490,9 +595,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logLbl.frame = NSRect(x: pad, y: y, width: 80, height: 12)
         cv.addSubview(logLbl)
 
-        // ── Activity Log (fills remaining space) ──
+        // ── Activity Log ──
         y -= 4
-        let logH = y - 6  // bottom padding
+        let logH = y - 6
         logView = NSScrollView(frame: NSRect(x: pad, y: 6, width: w, height: logH))
         logView.hasVerticalScroller = true
         logView.borderType = .noBorder
@@ -513,7 +618,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.orderFront(nil)
 
-        // Poll every 1s
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateClaudeStatus()
         }
@@ -536,20 +640,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return l
     }
 
-    func makeBar(x: CGFloat, y: CGFloat, width: CGFloat) -> NSView {
-        let bar = NSView(frame: NSRect(x: x, y: y, width: width, height: 6))
-        bar.wantsLayer = true
-        bar.layer?.backgroundColor = NSColor(white: 0.22, alpha: 1).cgColor
-        bar.layer?.cornerRadius = 3
-
-        let fill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 6))
-        fill.wantsLayer = true
-        fill.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        fill.layer?.cornerRadius = 3
-        bar.addSubview(fill)
-        return bar
-    }
-
     func logActivity(_ text: String, color: NSColor) {
         let now = Date()
         activityLog.append((now, text, color))
@@ -570,22 +660,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ]))
 
         logText.textStorage?.append(line)
-
-        // Auto-scroll to bottom
         logText.scrollToEndOfDocument(nil)
     }
 
-    func barColor(for percent: Int) -> NSColor {
-        if percent < 25 { return .systemGreen }
-        if percent < 50 { return .systemBlue }
-        if percent < 75 { return .systemYellow }
-        return .systemRed
-    }
-
-    func styledTitle(_ text: String) -> NSAttributedString {
+    func styledTitle(_ text: String, size: CGFloat = 12) -> NSAttributedString {
         NSAttributedString(string: text,
             attributes: [.foregroundColor: NSColor.white,
-                         .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+                         .font: NSFont.systemFont(ofSize: size, weight: .semibold)])
     }
 
     // ── STATUS UPDATE ──────────────────────────────────
@@ -593,34 +674,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let s = ClaudeStatus.read() else { return }
 
         // Header
-        headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey" : s.project
+        headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey Pro" : s.project
         modelLabel.stringValue = "\(s.model)  v\(s.version)"
 
-        // Context bar
-        let barW = ctxBarView.frame.width
-        ctxBarFill.frame.size.width = barW * CGFloat(min(s.contextPercent, 100)) / 100
-        let cc = barColor(for: s.contextPercent)
-        ctxBarFill.layer?.backgroundColor = cc.cgColor
-        ctxLabel.textColor = cc
+        // Update TFT display view
+        tftView.model = s.model.isEmpty ? "—" : s.model
+        tftView.contextPercent = s.contextPercent
+        tftView.rate5h = s.rate5h
+        tftView.rate7d = s.rate7d
+        tftView.costStr = String(format: "$%.2f", s.costUSD)
+        tftView.durationStr = "\(s.totalDurationMs / 1000)s"
+        tftView.linesStr = "+\(s.linesAdded)/-\(s.linesRemoved)"
+        tftView.needsAttention = s.needsAttention
+        tftView.status = s.needsAttention ? "APPROVE" : (s.isIdle ? "Idle" : "Ready")
+        if !s.activity.isEmpty {
+            tftView.activity = s.activity
+        }
+        tftView.needsDisplay = true
 
-        let tokensK = (s.inputTokens + s.outputTokens) / 1000
-        let ctxSizeK = s.contextWindowSize / 1000
-        ctxLabel.stringValue = "\(s.contextPercent)%  \(tokensK)k/\(ctxSizeK)k"
-
-        // Rate limits
-        rate5hFill.frame.size.width = rate5hBar.frame.width * CGFloat(min(s.rate5h, 100)) / 100
-        rate5hFill.layer?.backgroundColor = barColor(for: s.rate5h).cgColor
-        rate7dFill.frame.size.width = rate7dBar.frame.width * CGFloat(min(s.rate7d, 100)) / 100
-        rate7dFill.layer?.backgroundColor = barColor(for: s.rate7d).cgColor
-        rateLabel.stringValue = "5h: \(s.rate5h)%  |  7d: \(s.rate7d)%"
-
-        // Stats
-        let cost = String(format: "$%.2f", s.costUSD)
-        let dur = s.totalDurationMs / 1000
-        let cacheK = s.cacheReadTokens / 1000
-        statsLabel.stringValue = "\(cost) | \(dur)s | +\(s.linesAdded)/-\(s.linesRemoved) lines | cache: \(cacheK)k"
-
-        // Activity log (only add if new)
+        // Activity log
         if !s.activity.isEmpty && s.activity != lastActivity {
             lastActivity = s.activity
             let color: NSColor = s.activityTool.contains("Agent") ? .systemPurple
@@ -633,7 +705,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Needs attention
         if s.needsAttention {
             if alwaysAccept {
-                // Auto-accept: send Enter immediately
                 alwaysAcceptCount += 1
                 sendKey(36)
                 try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
@@ -667,7 +738,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "⌨"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "ClaudeKey Soft v0.2", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "ClaudeKey Pro", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Show Panel", action: #selector(showPanel), keyEquivalent: "")
         menu.addItem(withTitle: "Hide Panel", action: #selector(hidePanel), keyEquivalent: "")
@@ -680,9 +751,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func hidePanel() { panel.orderOut(nil) }
     @objc func quit() { NSApp.terminate(nil) }
 
-    // ── BUTTON ACTIONS ─────────────────────────────────
+    // ── CORE BUTTON ACTIONS ───────────────────────────
     @objc func doAccept() {
-        sendKey(36)  // Enter only — Claude Code defaults to accept
+        sendKey(36)
         logActivity("Sent: Enter (accept)", color: .systemGreen)
         try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
     }
@@ -707,14 +778,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if speech.isListening {
             speech.stopRecording()
             pttButton.layer?.backgroundColor = NSColor(white: 0.28, alpha: 1).cgColor
-            pttButton.attributedTitle = styledTitle("🎙 PTT")
+            pttButton.attributedTitle = styledTitle("🎙 PTT", size: 11)
             statusItem.button?.title = "⌨"
             logActivity("PTT: recognizing...", color: .systemYellow)
         } else {
             let started = speech.startRecording()
             if started {
                 pttButton.layer?.backgroundColor = NSColor.systemRed.cgColor
-                pttButton.attributedTitle = styledTitle("⏹ STOP")
+                pttButton.attributedTitle = styledTitle("⏹ STOP", size: 11)
                 statusItem.button?.title = "🎙"
                 logActivity("PTT: recording...", color: .systemRed)
             }
@@ -726,13 +797,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if alwaysAccept {
             alwaysAcceptCount = 0
             alwaysAcceptButton.layer?.backgroundColor = NSColor.systemRed.cgColor
-            alwaysAcceptButton.attributedTitle = styledTitle("⏹ Stop")
-            logActivity("Always-Accept ON — auto Enter on approval requests", color: .systemRed)
+            alwaysAcceptButton.attributedTitle = styledTitle("⏹ Stop", size: 11)
+            logActivity("Always-Accept ON", color: .systemRed)
         } else {
             alwaysAcceptButton.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
-            alwaysAcceptButton.attributedTitle = styledTitle("⚡ Always")
+            alwaysAcceptButton.attributedTitle = styledTitle("⚡ Always", size: 11)
             logActivity("Always-Accept OFF (auto-accepted \(alwaysAcceptCount)x)", color: .systemYellow)
         }
+    }
+
+    // ── PRO EXTRA ACTIONS ─────────────────────────────
+    @objc func doUndo() {
+        sendKey(6, flags: .maskCommand)  // Cmd+Z
+        logActivity("Sent: Cmd+Z (undo)", color: .systemBlue)
+    }
+
+    @objc func doInterrupt() {
+        sendKey(8, flags: .maskControl)  // Ctrl+C
+        logActivity("Sent: Ctrl+C (interrupt)", color: .systemRed)
+    }
+
+    @objc func doTab() {
+        sendKey(48)  // Tab
+        logActivity("Sent: Tab", color: .systemBlue)
+    }
+
+    @objc func doPaste() {
+        sendKey(9, flags: .maskCommand)  // Cmd+V
+        logActivity("Sent: Cmd+V (paste)", color: .systemBlue)
+    }
+
+    // ── ENCODER ACTIONS ───────────────────────────────
+    func encoderTurn(_ direction: Int) {
+        encoderValue += direction
+        if direction > 0 {
+            sendKey(125)  // Down
+            logActivity("Encoder: ▶ (Down) val=\(encoderValue)", color: .systemTeal)
+        } else {
+            sendKey(126)  // Up
+            logActivity("Encoder: ◀ (Up) val=\(encoderValue)", color: .systemTeal)
+        }
+        tftView.encoderValue = "enc:\(encoderValue)"
+        tftView.needsDisplay = true
+    }
+
+    func encoderPress() {
+        sendKey(36)  // Enter
+        logActivity("Encoder: Press (Enter)", color: .systemTeal)
     }
 }
 
