@@ -267,6 +267,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer?
     var blinkState = false
     var lastActivity = ""
+    var autoYesTimer: Timer?
+    var autoYesCount = 0
+    var autoYesButton: NonActivatingButton!
 
     let panelW: CGFloat = 360
     let panelH: CGFloat = 480
@@ -364,6 +367,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             if title.contains("PTT") { pttButton = btn }
             if title.contains("Accept") { acceptButton = btn }
+            if title.contains("Auto") { autoYesButton = btn }
         }
         y -= (btnH * 2 + 4 + 12)
 
@@ -612,11 +616,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // ── BUTTON ACTIONS ─────────────────────────────────
     @objc func doAccept() {
-        typeString("y")
-        usleep(20000)
-        sendKey(36)
-        logActivity("Sent: y + Enter", color: .systemGreen)
-        // Clear needs-attention notification
+        sendKey(36)  // Enter only — Claude Code defaults to accept
+        logActivity("Sent: Enter (accept)", color: .systemGreen)
         try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
     }
 
@@ -655,7 +656,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func doAutoYes() {
-        logActivity("Auto-Yes: coming in v0.2", color: .systemYellow)
+        if autoYesTimer != nil {
+            // Stop auto mode
+            autoYesTimer?.invalidate()
+            autoYesTimer = nil
+            autoYesButton.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+            autoYesButton.attributedTitle = styledTitle("⚡ Auto")
+            logActivity("Auto-Yes OFF (sent \(autoYesCount)x)", color: .systemYellow)
+            autoYesCount = 0
+        } else {
+            // Start auto mode: send Enter every 2 seconds
+            autoYesCount = 0
+            autoYesButton.layer?.backgroundColor = NSColor.systemRed.cgColor
+            autoYesButton.attributedTitle = styledTitle("⏹ Stop")
+            logActivity("Auto-Yes ON — sending Enter every 2s", color: .systemRed)
+            autoYesTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                self.autoYesCount += 1
+                sendKey(36)  // Enter
+                try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
+                self.logActivity("Auto #\(self.autoYesCount): Enter", color: NSColor(white: 0.45, alpha: 1))
+            }
+        }
     }
 }
 

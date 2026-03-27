@@ -167,7 +167,7 @@ void scanKeys() {
 void onKeyPress(uint8_t idx) {
     switch (idx) {
         case ACCEPT:
-            sendString("y\n");
+            sendKey(HID_KEY_ENTER);  // Enter only — Claude Code defaults to accept
             beepAccept();
             break;
         case REJECT:
