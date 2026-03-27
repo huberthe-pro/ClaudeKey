@@ -170,6 +170,45 @@ class ControlPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+// ── CLAUDE STATUS READER ───────────────────────────────
+struct ClaudeStatus {
+    var contextPercent: Int = 0
+    var model: String = ""
+    var costUSD: Double = 0
+    var rate5h: Int = 0
+    var rate7d: Int = 0
+    var project: String = ""
+
+    static func read() -> ClaudeStatus? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        var s = ClaudeStatus()
+        if let cw = json["context_window"] as? [String: Any] {
+            s.contextPercent = cw["used_percentage"] as? Int ?? 0
+        }
+        if let m = json["model"] as? [String: Any] {
+            s.model = m["display_name"] as? String ?? ""
+        }
+        if let c = json["cost"] as? [String: Any] {
+            s.costUSD = c["total_cost_usd"] as? Double ?? 0
+        }
+        if let rl = json["rate_limits"] as? [String: Any] {
+            if let h5 = rl["five_hour"] as? [String: Any] {
+                s.rate5h = Int(h5["used_percentage"] as? Double ?? 0)
+            }
+            if let d7 = rl["seven_day"] as? [String: Any] {
+                s.rate7d = Int(d7["used_percentage"] as? Double ?? 0)
+            }
+        }
+        if let ws = json["workspace"] as? [String: Any] {
+            let dir = ws["current_dir"] as? String ?? ""
+            s.project = (dir as NSString).lastPathComponent
+        }
+        return s
+    }
+}
+
 // ── APP DELEGATE ───────────────────────────────────────
 class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: ControlPanel!
@@ -178,6 +217,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var pttButton: NonActivatingButton!
     var statusLabel: NSTextField!
     var transcriptLabel: NSTextField!
+    var ctxBarView: NSView!
+    var ctxBarFill: NSView!
+    var ctxLabel: NSTextField!
+    var infoLabel: NSTextField!
+    var pollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -240,7 +284,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // ── FLOATING PANEL ─────────────────────────────────
     func setupPanel() {
         let panelW: CGFloat = 260
-        let panelH: CGFloat = 180
+        let panelH: CGFloat = 240
 
         let screen = NSScreen.main!.visibleFrame
         let x = screen.maxX - panelW - 20
@@ -324,7 +368,76 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             contentView.addSubview(btn)
         }
 
+        // ── Claude Code Status Area ──
+        let statusY: CGFloat = 8
+
+        // Context bar background
+        ctxBarView = NSView(frame: NSRect(x: 8, y: statusY + 28, width: panelW - 60, height: 10))
+        ctxBarView.wantsLayer = true
+        ctxBarView.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+        ctxBarView.layer?.cornerRadius = 3
+        contentView.addSubview(ctxBarView)
+
+        // Context bar fill
+        ctxBarFill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 10))
+        ctxBarFill.wantsLayer = true
+        ctxBarFill.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        ctxBarFill.layer?.cornerRadius = 3
+        ctxBarView.addSubview(ctxBarFill)
+
+        // Context percentage label
+        ctxLabel = NSTextField(labelWithString: "—")
+        ctxLabel.frame = NSRect(x: panelW - 48, y: statusY + 26, width: 44, height: 14)
+        ctxLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)
+        ctxLabel.textColor = .systemGreen
+        ctxLabel.alignment = .right
+        ctxLabel.backgroundColor = .clear
+        contentView.addSubview(ctxLabel)
+
+        // Info line: model | cost | rate limits
+        infoLabel = NSTextField(labelWithString: "Claude Code status: waiting...")
+        infoLabel.frame = NSRect(x: 8, y: statusY + 4, width: panelW - 16, height: 20)
+        infoLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+        infoLabel.textColor = NSColor(white: 0.6, alpha: 1)
+        infoLabel.backgroundColor = .clear
+        infoLabel.lineBreakMode = .byTruncatingTail
+        contentView.addSubview(infoLabel)
+
         panel.orderFront(nil)
+
+        // ── Poll Claude Code status every 1s ──
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateClaudeStatus()
+        }
+    }
+
+    // ── CLAUDE STATUS UPDATE ──────────────────────────
+    func updateClaudeStatus() {
+        guard let s = ClaudeStatus.read() else { return }
+
+        // Context bar fill width
+        let barW = ctxBarView.frame.width
+        let fillW = barW * CGFloat(min(s.contextPercent, 100)) / 100.0
+        ctxBarFill.frame.size.width = fillW
+
+        // Color based on usage
+        let barColor: NSColor
+        if s.contextPercent < 25 {
+            barColor = .systemGreen
+        } else if s.contextPercent < 50 {
+            barColor = .systemBlue
+        } else if s.contextPercent < 75 {
+            barColor = .systemYellow
+        } else {
+            barColor = .systemRed
+        }
+        ctxBarFill.layer?.backgroundColor = barColor.cgColor
+        ctxLabel.textColor = barColor
+        ctxLabel.stringValue = "\(s.contextPercent)%"
+
+        // Info line
+        let cost = String(format: "$%.2f", s.costUSD)
+        infoLabel.stringValue = "\(s.project) | \(cost) | 5h:\(s.rate5h)% 7d:\(s.rate7d)%"
     }
 
     // ── MENUBAR ────────────────────────────────────────

@@ -1,64 +1,23 @@
 #!/bin/bash
-# Claude Code status hook → ClaudeKey LED strip
+# ClaudeKey status hook wrapper
+# Saves status JSON for ClaudeKeySoft, then passes through to claude-hud
 #
-# Reads JSON from Claude Code status event via stdin,
-# maps context window usage to LED color,
-# sends color command to ESP32-S3 via USB serial.
-#
-# Install: add to ~/.claude/settings.json:
-#   "statusline": { "type": "command", "command": "/path/to/claude-status-hook" }
+# Install: replace statusLine.command in ~/.claude/settings.json with this script
 
-# Find ClaudeKey serial port (CDC data port, not console)
-# Console port usually ends in 1, data port in 3 or higher
-find_serial() {
-    for dev in /dev/cu.usbmodem*; do
-        [ -e "$dev" ] || continue
-        # Skip console port (typically ends in 1)
-        case "$dev" in
-            *1) continue ;;
-            *)  echo "$dev"; return ;;
-        esac
-    done
-}
-
-SERIAL=$(find_serial)
-
-# Read JSON from stdin
 read -r json 2>/dev/null || exit 0
 
-# Extract context usage percentage
-usage=$(echo "$json" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    # Try common field paths
-    cw = d.get('context_window', d.get('contextWindow', {}))
-    pct = cw.get('usage_percent', cw.get('usagePercent', cw.get('percentUsed', 0)))
-    if isinstance(pct, str):
-        pct = float(pct)
-    print(int(pct))
-except:
-    print(0)
-" 2>/dev/null)
+# Save for ClaudeKeySoft to read
+echo "$json" > /tmp/claudekey-status.json
 
-# Map usage to color + mode
-if [ "$usage" -lt 25 ]; then
-    color="green";  mode="breathe"
-elif [ "$usage" -lt 50 ]; then
-    color="blue";   mode="breathe"
-elif [ "$usage" -lt 75 ]; then
-    color="yellow"; mode="solid"
-elif [ "$usage" -lt 90 ]; then
-    color="red";    mode="solid"
+# Also log for debugging (first 50 lines, then rotate)
+echo "$json" >> /tmp/claudekey-status-log.jsonl
+tail -50 /tmp/claudekey-status-log.jsonl > /tmp/claudekey-status-log.tmp 2>/dev/null
+mv /tmp/claudekey-status-log.tmp /tmp/claudekey-status-log.jsonl 2>/dev/null
+
+# Pass through to claude-hud (original statusLine command)
+HUD_DIR=$(ls -td ~/.claude/plugins/cache/claude-hud/claude-hud/*/ 2>/dev/null | head -1)
+if [ -n "$HUD_DIR" ]; then
+    echo "$json" | "/Users/minbot/.local/share/fnm/node-versions/v24.14.0/installation/bin/node" "${HUD_DIR}dist/index.js"
 else
-    color="red";    mode="blink"
+    echo "ctx:?"
 fi
-
-# Send to ClaudeKey hardware
-if [ -n "$SERIAL" ]; then
-    echo "S:$color" > "$SERIAL" 2>/dev/null
-    echo "M:$mode"  > "$SERIAL" 2>/dev/null
-fi
-
-# Output for Claude Code status line display (optional)
-echo "ctx:${usage}%"
