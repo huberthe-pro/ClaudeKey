@@ -1,0 +1,15 @@
+# Build artifacts
+app/ClaudeKey
+*.o
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# CircuitPython
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
