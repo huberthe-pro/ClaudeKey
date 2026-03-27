@@ -191,30 +191,49 @@ scripts/
 
 ## BOM (Bill of Materials)
 
-### Lite
+### Lite — 6键 + LED底部灯带
 
-| Item | Qty | Est. Price |
-|------|-----|-----------|
-| ESP32-S3 DevKitC (USB-C) | 1 | ¥25-40 |
-| Cherry MX switches | 6 | ¥18-30 |
-| Kailh hot-swap sockets | 6 | ¥6-12 |
-| 1U keycaps | 6 | ¥12-30 |
-| INMP441 I2S MEMS mic | 1 | ¥5-8 |
-| Passive buzzer (3.3V) | 1 | ¥1-3 |
-| WS2812B LED strip (8 LED) | 1 | ¥10-15 |
-| Breadboard 400-hole | 1 | ¥5-10 |
-| Dupont jumper wires | 1 pack | ¥5-10 |
-| USB-C data cable | 1 | ¥10 |
-| **Total** | | **¥96-168** |
+| 物料 | 规格 | 数量 | 参考价 | 淘宝关键词 |
+|------|------|------|--------|-----------|
+| ESP32-S3 开发板 | DevKitC-1 USB-C | 1 | ¥25-40 | ESP32-S3-DevKitC |
+| 机械轴 | Cherry MX 红轴 | 6 | ¥18-30 | Cherry MX 红轴 |
+| 热插拔轴座 | Kailh PCB socket | 6 | ¥6-12 | kailh 热插拔 |
+| 键帽 | 1U PBT 黑色哑光 | 6 | ¥12-30 | PBT 1U 键帽 |
+| 麦克风 | INMP441 I2S MEMS | 1 | ¥5-8 | INMP441 |
+| 蜂鸣器 | 无源 3.3V 5mm | 1 | ¥1-3 | 无源蜂鸣器 3.3V |
+| LED 灯带 | WS2812B 8颗 | 1 | ¥10-15 | WS2812B 灯带 |
+| 3D打印外壳 | PLA 黑色哑光 | 1 | ¥15-30 | 3D打印定制 |
+| 面包板 | 400孔 | 1 | ¥5-10 | 面包板 400孔 |
+| 杜邦线 | 公母混合 | 1包 | ¥5-10 | 杜邦线 |
+| USB-C 线 | 数据线 0.5m | 1 | ¥10 | USB-C 数据线 |
+| **合计** | | | **¥112-198** | |
 
-### Pro (adds to Lite)
+### Pro — 10键 + 2.42" OLED + 旋钮
 
-| Item | Qty | Est. Price |
-|------|-----|-----------|
-| ST7789 1.3" TFT 240x240 | 1 | ¥15-20 |
-| EC11 rotary encoder + knob | 1 | ¥3-5 |
-| Cherry MX switches (extra) | 4 | ¥12-20 |
-| Kailh hot-swap sockets (extra) | 4 | ¥4-8 |
-| 1U keycaps (extra) | 4 | ¥8-20 |
-| Larger breadboard or PCB | 1 | ¥10-20 |
-| **Pro Total** | | **¥148-261** |
+> 在 Lite 基础上增加以下物料
+
+| 物料 | 规格 | 数量 | 参考价 | 淘宝关键词 |
+|------|------|------|--------|-----------|
+| OLED 显示屏 | SSD1309 2.42" 128x64 I2C | 1 | ¥20-35 | SSD1309 2.42寸 OLED |
+| 旋转编码器 | EC11 带按压 + 金属旋钮帽 | 1 | ¥5-15 | EC11 编码器 旋钮 |
+| 机械轴（加） | Cherry MX 红轴 | 4 | ¥12-20 | Cherry MX 红轴 |
+| 热插拔轴座（加） | Kailh PCB socket | 4 | ¥4-8 | kailh 热插拔 |
+| 键帽（加） | 1U PBT 黑色哑光 | 4 | ¥8-20 | PBT 1U 键帽 |
+| 拉丝铝面板 | 1.5mm 铝板 激光切割 | 1 | ¥20-40 | 铝板 激光切割 定制 |
+| 3D打印外壳（Pro） | PLA 黑色 较大尺寸 | 1 | ¥20-40 | 3D打印定制 |
+| 卷线 USB-C | 弹簧卷线 数据线 | 1 | ¥15-25 | USB-C 卷线 |
+| **Pro 增量** | | | **¥104-203** | |
+| **Pro 合计** | | | **¥216-401** | |
+
+### 布局参数（Pro 实物参考）
+
+```
+整体尺寸约: 165mm × 130mm × 45mm (含倾斜底座)
+
+OLED 区: 宽 ~130mm × 高 ~35mm  (2.42" 128x64)
+按键区: 3列 × 2行 核心键  +  右侧旋钮
+  核心键间距: 19mm (1U标准)
+  旋钮直径: 30mm 铝合金滚花
+底部快捷键: 4键 × 1行 (略小于1U)
+LED 灯带: 底边环绕 8颗 WS2812B
+```
