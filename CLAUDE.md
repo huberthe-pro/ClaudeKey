@@ -1,16 +1,17 @@
 # ClaudeKey
 
-Agentic Coding 控制面板 — ESP32-S3 六键键盘 + LED 状态灯带 + macOS PTT app。
+Agentic Coding 控制面板 — ESP32-S3 六键键盘 + I2S 麦克风 + LED 状态灯带 + macOS PTT app。
 
 ## Architecture
 
 ```
                     USB HID (direct keystrokes)
 ESP32-S3 ─────────────────────────────────────────→ macOS Terminal
-  6 keys            │                                    │
-  LED strip         │ F13 only                           │
-                    └──────→ ClaudeKey.app ──CGEvent──→ WisprFlow
-                                  ↑
+  6 keys            │
+  INMP441 mic       │ F13 (PTT button)
+  LED strip         └──────→ ClaudeKey.app ──CGEvent──→ WisprFlow
+                                  │                      (uses ClaudeKey mic)
+                                  │
 Claude Code ──status hook JSON──→ scripts/claude-status-hook
                                   │
                                   └──serial──→ ESP32-S3 LED strip
@@ -25,11 +26,14 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
   GPIO5  ──────── [Reject ✗] ──── GND          3.3V ───── VCC
   GPIO6  ──────── [  Up  ↑ ] ──── GND          GND ────── GND
   GPIO7  ──────── [ Down ↓ ] ──── GND
-  GPIO15 ──────── [ PTT  🎙] ──── GND
-  GPIO16 ──────── [Spare   ] ──── GND
-
-  All switches: one pin to GPIO, other pin to GND (internal pull-up enabled)
-  Adjust GPIO numbers in firmware/code.py for your board
+  GPIO15 ──────── [ PTT  🎙] ──── GND          INMP441 (I2S MEMS Mic)
+  GPIO16 ──────── [Spare   ] ──── GND          ────────────────────
+                                                GPIO42 ─── WS  (LRCK)
+  All switches: one pin to GPIO,                GPIO41 ─── SCK (BCLK)
+  other pin to GND (internal pull-up)           GPIO40 ─── SD  (DOUT)
+  Adjust GPIO numbers in firmware/src/main.cpp  3.3V ───── VDD
+                                                GND ────── GND
+                                                GND ────── L/R (left ch)
 ```
 
 ## Key Behavior
@@ -38,9 +42,9 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
 |-----|-----------|-------|
 | Accept | `y` + Enter | Direct to frontmost app |
 | Reject | Esc | Direct to frontmost app |
-| Up | ↑ arrow | Direct to frontmost app |
-| Down | ↓ arrow | Direct to frontmost app |
-| PTT | F13 → macOS app → Cmd+Shift+Space | WisprFlow push-to-talk |
+| Up | Up arrow | Direct to frontmost app |
+| Down | Down arrow | Direct to frontmost app |
+| PTT | F13 → macOS app → Cmd+Shift+Space | WisprFlow PTT, mic on device |
 | Spare | (unassigned) | v0.2 |
 
 ## LED Status (via Claude Code status hook)
@@ -52,22 +56,20 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
 | 50-75% | Yellow | Solid |
 | 75-90% | Red | Solid |
 | > 90% | Red | Blink |
+| PTT active | Purple | Pulse |
 
 ## Setup
 
-### 1. Flash firmware to ESP32-S3
+### 1. Build and flash firmware (PlatformIO)
 
 ```bash
-pip install esptool
-# Download CircuitPython for your ESP32-S3 board from circuitpython.org
-# Hold BOOT button, plug USB, flash:
-esptool.py --chip esp32s3 erase_flash
-esptool.py --chip esp32s3 write_flash -z 0x0 adafruit-circuitpython-*.bin
+# Install PlatformIO CLI
+pip install platformio
 
-# Copy libraries to CIRCUITPY drive:
-#   lib/adafruit_hid/        (from Adafruit CircuitPython Bundle)
-#   lib/neopixel.mpy
-# Copy firmware/boot.py and firmware/code.py to CIRCUITPY root
+# Build and upload
+cd firmware
+pio run --target upload
+# Hold BOOT button on ESP32-S3 if it doesn't enter download mode automatically
 ```
 
 ### 2. Build macOS app
@@ -85,30 +87,54 @@ cd app && ./build.sh
 # "statusline": { "type": "command", "command": "/path/to/ClaudeKey/scripts/claude-status-hook" }
 ```
 
+### 4. Configure WisprFlow mic input
+
+In WisprFlow settings, select "ClaudeKey" (or the ESP32-S3 USB audio device) as the microphone input. The mic is mounted on the keyboard, closer to you than your laptop mic.
+
 ## Testing
 
 ```bash
+# Build firmware
+cd firmware && pio run
+
 # Build macOS app
-cd app && swiftc -O -framework AppKit -framework CoreGraphics -o ClaudeKey ClaudeKey.swift
+cd app && ./build.sh
 
 # Manual test checklist:
 # [ ] Accept key sends 'y' + Enter to terminal
 # [ ] Reject key sends Esc
 # [ ] Up/Down navigate history
 # [ ] PTT activates WisprFlow (hold = talk, release = stop)
+# [ ] Mic audio captured when PTT held
 # [ ] LED strip shows green on startup
-# [ ] LED changes color when Claude Code is running (with hook installed)
+# [ ] LED strip changes color with Claude Code context usage
+# [ ] LED turns purple pulse when PTT active
 ```
 
 ## Project Structure
 
 ```
 firmware/
-  boot.py         USB HID + serial config
-  code.py         Keys + LED + serial listener (~120 lines)
+  platformio.ini    PlatformIO config (ESP32-S3 + TinyUSB)
+  src/main.cpp      Keys + I2S mic + LED + serial (~250 lines)
 app/
-  ClaudeKey.swift  macOS menubar PTT app (~150 lines)
-  build.sh         Compile with swiftc
+  ClaudeKey.swift   macOS menubar PTT app (~150 lines)
+  build.sh          Compile with swiftc
 scripts/
-  claude-status-hook   Claude Code status → LED serial
+  claude-status-hook  Claude Code status → LED serial
 ```
+
+## BOM (Bill of Materials)
+
+| Item | Qty | Est. Price |
+|------|-----|-----------|
+| ESP32-S3 DevKitC (USB-C) | 1 | ¥25-40 |
+| Cherry MX switches | 6 | ¥18-30 |
+| Kailh hot-swap sockets | 6 | ¥6-12 |
+| 1U keycaps (multi-color) | 6 | ¥12-30 |
+| INMP441 I2S MEMS mic | 1 | ¥5-8 |
+| WS2812B LED strip (8 LED) | 1 | ¥10-15 |
+| Breadboard 400-hole | 1 | ¥5-10 |
+| Dupont jumper wires | 1 pack | ¥5-10 |
+| USB-C data cable | 1 | ¥10 |
+| **Total** | | **¥95-165** |
