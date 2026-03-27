@@ -1,5 +1,6 @@
 # Build artifacts
 app/ClaudeKey
+app/ClaudeKeySoft
 *.o
 *.dSYM/
 
