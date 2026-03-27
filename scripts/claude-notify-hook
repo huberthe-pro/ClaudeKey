@@ -1,0 +1,27 @@
+#!/bin/bash
+# ClaudeKey notification hook — alerts panel when Claude needs attention
+#
+# Add to ~/.claude/settings.json under "hooks":
+#   { "event": "Notification", "type": "command",
+#     "command": "/path/to/ClaudeKey/scripts/claude-notify-hook" }
+
+read -r json 2>/dev/null || exit 0
+
+TYPE=$(echo "$json" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('notification_type', ''))
+except:
+    print('')
+" 2>/dev/null)
+
+# Write notification state for ClaudeKeySoft to read
+case "$TYPE" in
+    permission_prompt)
+        echo '{"type":"permission","ts":'$(date +%s)'}' > /tmp/claudekey-notify.json
+        ;;
+    idle_prompt)
+        echo '{"type":"idle","ts":'$(date +%s)'}' > /tmp/claudekey-notify.json
+        ;;
+esac

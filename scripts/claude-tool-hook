@@ -1,0 +1,53 @@
+#!/bin/bash
+# ClaudeKey tool activity hook — shows what Claude is doing right now
+#
+# Add to ~/.claude/settings.json under "hooks":
+#   { "event": "PreToolUse", "type": "command",
+#     "command": "/path/to/ClaudeKey/scripts/claude-tool-hook" }
+
+read -r json 2>/dev/null || exit 0
+
+python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    tool = d.get('tool_name', '')
+    inp = d.get('tool_input', {})
+    ts = $(date +%s)
+
+    activity = ''
+    if tool == 'Bash':
+        cmd = inp.get('command', '')[:60]
+        activity = f'Run: {cmd}'
+    elif tool == 'Write':
+        f = inp.get('file_path', '').split('/')[-1]
+        activity = f'Write: {f}'
+    elif tool == 'Edit':
+        f = inp.get('file_path', '').split('/')[-1]
+        activity = f'Edit: {f}'
+    elif tool == 'Read':
+        f = inp.get('file_path', '').split('/')[-1]
+        activity = f'Read: {f}'
+    elif tool == 'Glob':
+        p = inp.get('pattern', '')
+        activity = f'Search: {p}'
+    elif tool == 'Grep':
+        p = inp.get('pattern', '')[:40]
+        activity = f'Grep: {p}'
+    elif tool == 'WebSearch':
+        q = inp.get('query', '')[:40]
+        activity = f'Search: {q}'
+    elif tool == 'Agent':
+        t = inp.get('subagent_type', 'agent')
+        activity = f'Agent: {t}'
+    elif tool.startswith('mcp__'):
+        activity = f'MCP: {tool.split(\"__\")[-1]}'
+    else:
+        activity = f'{tool}'
+
+    if activity:
+        with open('/tmp/claudekey-activity.json', 'w') as f:
+            json.dump({'activity': activity, 'tool': tool, 'ts': ts}, f)
+except:
+    pass
+" 2>/dev/null

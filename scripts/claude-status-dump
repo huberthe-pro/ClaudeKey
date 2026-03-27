@@ -1,0 +1,6 @@
+#!/bin/bash
+# Dump Claude Code status JSON to file (debug: see what fields are available)
+# Install: add to ~/.claude/settings.json
+read -r json 2>/dev/null || exit 0
+echo "$json" > /tmp/claudekey-status.json
+echo "$json" >> /tmp/claudekey-status-log.jsonl

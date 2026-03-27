@@ -179,6 +179,11 @@ struct ClaudeStatus {
     var rate7d: Int = 0
     var project: String = ""
 
+    // From hooks
+    var activity: String = ""       // current tool action
+    var needsAttention: Bool = false // permission_prompt active
+    var isIdle: Bool = false        // Claude finished, waiting for input
+
     static func read() -> ClaudeStatus? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -205,6 +210,28 @@ struct ClaudeStatus {
             let dir = ws["current_dir"] as? String ?? ""
             s.project = (dir as NSString).lastPathComponent
         }
+
+        // Read activity from tool hook
+        let now = Int(Date().timeIntervalSince1970)
+        if let actData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-activity.json")),
+           let actJson = try? JSONSerialization.jsonObject(with: actData) as? [String: Any] {
+            let ts = actJson["ts"] as? Int ?? 0
+            if now - ts < 10 {  // activity within last 10 seconds
+                s.activity = actJson["activity"] as? String ?? ""
+            }
+        }
+
+        // Read notification state
+        if let notifData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-notify.json")),
+           let notifJson = try? JSONSerialization.jsonObject(with: notifData) as? [String: Any] {
+            let ts = notifJson["ts"] as? Int ?? 0
+            if now - ts < 30 {  // notification within last 30 seconds
+                let type = notifJson["type"] as? String ?? ""
+                s.needsAttention = (type == "permission")
+                s.isIdle = (type == "idle")
+            }
+        }
+
         return s
     }
 }
@@ -221,7 +248,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var ctxBarFill: NSView!
     var ctxLabel: NSTextField!
     var infoLabel: NSTextField!
+    var activityLabel: NSTextField!
     var pollTimer: Timer?
+    var blinkState = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -394,9 +423,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ctxLabel.backgroundColor = .clear
         contentView.addSubview(ctxLabel)
 
-        // Info line: model | cost | rate limits
-        infoLabel = NSTextField(labelWithString: "Claude Code status: waiting...")
-        infoLabel.frame = NSRect(x: 8, y: statusY + 4, width: panelW - 16, height: 20)
+        // Activity line (what Claude is doing right now)
+        activityLabel = NSTextField(labelWithString: "")
+        activityLabel.frame = NSRect(x: 8, y: statusY + 20, width: panelW - 16, height: 14)
+        activityLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
+        activityLabel.textColor = .systemCyan
+        activityLabel.backgroundColor = .clear
+        activityLabel.lineBreakMode = .byTruncatingTail
+        contentView.addSubview(activityLabel)
+
+        // Info line: project | cost | rate limits
+        infoLabel = NSTextField(labelWithString: "Claude Code: waiting...")
+        infoLabel.frame = NSRect(x: 8, y: statusY + 4, width: panelW - 16, height: 14)
         infoLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
         infoLabel.textColor = NSColor(white: 0.6, alpha: 1)
         infoLabel.backgroundColor = .clear
@@ -435,9 +473,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ctxLabel.textColor = barColor
         ctxLabel.stringValue = "\(s.contextPercent)%"
 
+        // Activity line
+        if s.needsAttention {
+            blinkState.toggle()
+            activityLabel.stringValue = blinkState ? ">>> NEEDS APPROVAL <<<" : ""
+            activityLabel.textColor = .systemYellow
+            // Flash the Accept button
+            let acceptColor: NSColor = blinkState ? .systemGreen : NSColor(white: 0.3, alpha: 1)
+            // Find accept button and flash it
+            panel.contentView?.subviews.compactMap { $0 as? NonActivatingButton }.forEach {
+                if $0.title.contains("Accept") || $0.attributedTitle.string.contains("Accept") {
+                    $0.layer?.backgroundColor = acceptColor.cgColor
+                }
+            }
+        } else if s.isIdle {
+            activityLabel.stringValue = "Waiting for input..."
+            activityLabel.textColor = .systemGreen
+        } else if !s.activity.isEmpty {
+            activityLabel.stringValue = s.activity
+            activityLabel.textColor = .systemCyan
+        } else {
+            activityLabel.stringValue = ""
+        }
+
         // Info line
         let cost = String(format: "$%.2f", s.costUSD)
         infoLabel.stringValue = "\(s.project) | \(cost) | 5h:\(s.rate5h)% 7d:\(s.rate7d)%"
+
+        // Update menubar with context percentage
+        if s.needsAttention {
+            statusItem.button?.title = blinkState ? "⚠️" : "⌨"
+        } else if !speech.isListening {
+            statusItem.button?.title = s.contextPercent > 75 ? "🔴" : "⌨"
+        }
     }
 
     // ── MENUBAR ────────────────────────────────────────
