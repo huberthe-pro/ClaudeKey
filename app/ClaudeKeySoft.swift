@@ -1,7 +1,8 @@
 /**
- ClaudeKey Soft — pure software floating control panel
+ ClaudeKey Soft v0.2 — Agentic Coding Control Panel
 
  NSPanel + .nonActivatingPanel: clicks NEVER steal focus from iTerm.
+ Shows real-time Claude Code status, activity log, and controls.
 
  Build:  cd app && ./build-soft.sh
  Run:    ./ClaudeKeySoft
@@ -13,8 +14,6 @@ import AVFoundation
 import Speech
 
 // ── SPEECH ENGINE ──────────────────────────────────────
-// Uses AVAudioRecorder (file-based) instead of AVAudioEngine.installTap
-// which has known NSException issues on macOS.
 class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recorder: AVAudioRecorder?
@@ -38,7 +37,7 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
             DispatchQueue.main.async {
                 self.authStatus = status
                 if status != .authorized {
-                    self.onError?("Speech permission denied. System Settings > Privacy > Speech Recognition")
+                    self.onError?("Speech permission denied")
                 }
                 completion(status == .authorized)
             }
@@ -46,10 +45,8 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     }
 
     func startRecording() -> Bool {
-        NSLog("ClaudeKey: [PTT] start recording, auth=\(authStatus.rawValue)")
-
         guard authStatus == .authorized else {
-            onError?("Speech not authorized. System Settings > Privacy > Speech Recognition")
+            onError?("Speech not authorized")
             return false
         }
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
@@ -68,59 +65,48 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
         do {
             recorder = try AVAudioRecorder(url: tempFileURL, settings: settings)
         } catch {
-            NSLog("ClaudeKey: [PTT] AVAudioRecorder init failed: \(error)")
             onError?("Mic init failed: \(error.localizedDescription)")
             return false
         }
 
         recorder?.delegate = self
         guard recorder?.record() == true else {
-            NSLog("ClaudeKey: [PTT] record() returned false")
-            onError?("Mic failed to start recording")
+            onError?("Mic failed to start")
             return false
         }
 
         isListening = true
         startTime = Date()
-        NSLog("ClaudeKey: [PTT] RECORDING to \(tempFileURL.lastPathComponent)")
         return true
     }
 
     func stopRecording() {
         guard isListening else { return }
         let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
-        NSLog("ClaudeKey: [PTT] stop recording, duration=%.1fs", duration)
 
         recorder?.stop()
         recorder = nil
         isListening = false
 
         guard duration > 0.3 else {
-            NSLog("ClaudeKey: [PTT] too short (< 0.3s), skipping recognition")
             onError?("Recording too short")
             return
         }
 
-        // Recognize the recorded file
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
             onError?("Speech recognizer unavailable")
             return
         }
 
         let request = SFSpeechURLRecognitionRequest(url: tempFileURL)
-        NSLog("ClaudeKey: [PTT] recognizing...")
-
         recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    NSLog("ClaudeKey: [PTT] recognition error: \(error.localizedDescription)")
                     self?.onError?("Recognition failed: \(error.localizedDescription)")
                     return
                 }
                 guard let result = result, result.isFinal else { return }
-                let text = result.bestTranscription.formattedString
-                NSLog("ClaudeKey: [PTT] recognized: \"\(text)\"")
-                self?.onResult?(text)
+                self?.onResult?(result.bestTranscription.formattedString)
             }
         }
     }
@@ -150,27 +136,20 @@ func sendKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
     up.post(tap: .cgAnnotatedSessionEventTap)
 }
 
-// ── NON-ACTIVATING BUTTON ──────────────────────────────
+// ── NON-ACTIVATING CONTROLS ────────────────────────────
 class NonActivatingButton: NSButton {
     override var acceptsFirstResponder: Bool { false }
     var onPress: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        isHighlighted = true
-        onPress?()
-    }
-    override func mouseUp(with event: NSEvent) {
-        isHighlighted = false
-    }
+    override func mouseDown(with event: NSEvent) { isHighlighted = true; onPress?() }
+    override func mouseUp(with event: NSEvent) { isHighlighted = false }
 }
 
-// ── NON-ACTIVATING PANEL ───────────────────────────────
 class ControlPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
-// ── CLAUDE STATUS READER ───────────────────────────────
+// ── CLAUDE STATUS ──────────────────────────────────────
 struct ClaudeStatus {
     var contextPercent: Int = 0
     var model: String = ""
@@ -178,25 +157,43 @@ struct ClaudeStatus {
     var rate5h: Int = 0
     var rate7d: Int = 0
     var project: String = ""
+    var linesAdded: Int = 0
+    var linesRemoved: Int = 0
+    var version: String = ""
+    var totalDurationMs: Int = 0
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
+    var cacheReadTokens: Int = 0
+    var contextWindowSize: Int = 0
 
-    // From hooks
-    var activity: String = ""       // current tool action
-    var needsAttention: Bool = false // permission_prompt active
-    var isIdle: Bool = false        // Claude finished, waiting for input
+    var activity: String = ""
+    var activityTool: String = ""
+    var needsAttention: Bool = false
+    var isIdle: Bool = false
 
     static func read() -> ClaudeStatus? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
 
         var s = ClaudeStatus()
+
         if let cw = json["context_window"] as? [String: Any] {
             s.contextPercent = cw["used_percentage"] as? Int ?? 0
+            s.contextWindowSize = cw["context_window_size"] as? Int ?? 0
+            if let cu = cw["current_usage"] as? [String: Any] {
+                s.inputTokens = cu["input_tokens"] as? Int ?? 0
+                s.outputTokens = cu["output_tokens"] as? Int ?? 0
+                s.cacheReadTokens = cu["cache_read_input_tokens"] as? Int ?? 0
+            }
         }
         if let m = json["model"] as? [String: Any] {
             s.model = m["display_name"] as? String ?? ""
         }
         if let c = json["cost"] as? [String: Any] {
             s.costUSD = c["total_cost_usd"] as? Double ?? 0
+            s.totalDurationMs = c["total_duration_ms"] as? Int ?? 0
+            s.linesAdded = c["total_lines_added"] as? Int ?? 0
+            s.linesRemoved = c["total_lines_removed"] as? Int ?? 0
         }
         if let rl = json["rate_limits"] as? [String: Any] {
             if let h5 = rl["five_hour"] as? [String: Any] {
@@ -210,28 +207,26 @@ struct ClaudeStatus {
             let dir = ws["current_dir"] as? String ?? ""
             s.project = (dir as NSString).lastPathComponent
         }
+        s.version = json["version"] as? String ?? ""
 
-        // Read activity from tool hook
         let now = Int(Date().timeIntervalSince1970)
         if let actData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-activity.json")),
            let actJson = try? JSONSerialization.jsonObject(with: actData) as? [String: Any] {
             let ts = actJson["ts"] as? Int ?? 0
-            if now - ts < 10 {  // activity within last 10 seconds
+            if now - ts < 10 {
                 s.activity = actJson["activity"] as? String ?? ""
+                s.activityTool = actJson["tool"] as? String ?? ""
             }
         }
-
-        // Read notification state
         if let notifData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-notify.json")),
            let notifJson = try? JSONSerialization.jsonObject(with: notifData) as? [String: Any] {
             let ts = notifJson["ts"] as? Int ?? 0
-            if now - ts < 30 {  // notification within last 30 seconds
+            if now - ts < 30 {
                 let type = notifJson["type"] as? String ?? ""
                 s.needsAttention = (type == "permission")
                 s.isIdle = (type == "idle")
             }
         }
-
         return s
     }
 }
@@ -241,89 +236,79 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: ControlPanel!
     var statusItem: NSStatusItem!
     let speech = SpeechEngine()
+
+    // UI elements
+    var headerLabel: NSTextField!
+    var modelLabel: NSTextField!
     var pttButton: NonActivatingButton!
-    var statusLabel: NSTextField!
-    var transcriptLabel: NSTextField!
+    var acceptButton: NonActivatingButton!
+
+    // Context section
     var ctxBarView: NSView!
     var ctxBarFill: NSView!
     var ctxLabel: NSTextField!
-    var infoLabel: NSTextField!
-    var activityLabel: NSTextField!
+
+    // Rate limit bars
+    var rate5hBar: NSView!
+    var rate5hFill: NSView!
+    var rate7dBar: NSView!
+    var rate7dFill: NSView!
+    var rateLabel: NSTextField!
+
+    // Stats
+    var statsLabel: NSTextField!
+
+    // Activity log
+    var logView: NSScrollView!
+    var logText: NSTextView!
+    var activityLog: [(Date, String, NSColor)] = []
+    let maxLogEntries = 100
+
     var pollTimer: Timer?
     var blinkState = false
+    var lastActivity = ""
+
+    let panelW: CGFloat = 360
+    let panelH: CGFloat = 480
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // Accessibility
         let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-        let axOk = AXIsProcessTrustedWithOptions(opts)
+        AXIsProcessTrustedWithOptions(opts)
 
         setupPanel()
         setupMenuBar()
 
-        // Show initial status
-        if !axOk {
-            setStatus("Need Accessibility permission", color: .systemOrange)
-        }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in }
 
-        // Request mic permission
-        AVCaptureDevice.requestAccess(for: .audio) { granted in
-            DispatchQueue.main.async {
-                if !granted {
-                    self.setStatus("Microphone permission denied", color: .systemRed)
-                }
-            }
-        }
-
-        // Request speech permission
         speech.onError = { [weak self] msg in
-            self?.setStatus(msg, color: .systemRed)
-            self?.transcriptLabel.stringValue = ""
+            self?.logActivity(msg, color: .systemRed)
         }
         speech.onResult = { [weak self] text in
             guard let self = self, !text.isEmpty else { return }
-            self.setStatus("Typing: \(text)", color: .systemGreen)
-            self.transcriptLabel.stringValue = text
+            self.logActivity("Voice: \(text)", color: .systemPurple)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 typeString(text)
-                sendKey(36) // Enter
-                self.setStatus("Ready", color: .systemGreen)
+                sendKey(36)
             }
         }
         speech.requestPermission { [weak self] granted in
-            guard let self = self else { return }
-            if granted {
-                self.setStatus("Ready", color: .systemGreen)
-            } else {
-                self.setStatus("Speech permission denied", color: .systemRed)
-            }
+            self?.logActivity(granted ? "Speech ready" : "Speech permission denied",
+                              color: granted ? .systemGreen : .systemRed)
         }
 
-        NSLog("ClaudeKey Soft: ready")
+        logActivity("ClaudeKey Soft ready", color: .systemGreen)
     }
 
-    // ── STATUS ─────────────────────────────────────────
-    func setStatus(_ text: String, color: NSColor) {
-        statusLabel.stringValue = text
-        statusLabel.textColor = color
-        NSLog("ClaudeKey: \(text)")
-    }
-
-    // ── FLOATING PANEL ─────────────────────────────────
+    // ── PANEL LAYOUT ───────────────────────────────────
     func setupPanel() {
-        let panelW: CGFloat = 260
-        let panelH: CGFloat = 240
-
         let screen = NSScreen.main!.visibleFrame
-        let x = screen.maxX - panelW - 20
-        let y = screen.minY + 20
-
         panel = ControlPanel(
-            contentRect: NSRect(x: x, y: y, width: panelW, height: panelH),
-            styleMask: [.titled, .closable, .nonactivatingPanel, .utilityWindow],
-            backing: .buffered,
-            defer: false
+            contentRect: NSRect(x: screen.maxX - panelW - 16, y: screen.minY + 16,
+                                width: panelW, height: panelH),
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
+            backing: .buffered, defer: false
         )
         panel.title = "ClaudeKey"
         panel.level = .floating
@@ -332,179 +317,277 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isMovableByWindowBackground = true
         panel.titlebarAppearsTransparent = true
-        panel.backgroundColor = NSColor(white: 0.15, alpha: 0.95)
+        panel.backgroundColor = NSColor(white: 0.12, alpha: 0.97)
+        panel.minSize = NSSize(width: 300, height: 380)
 
-        let contentView = panel.contentView!
+        let cv = panel.contentView!
+        var y = panelH - 32
 
-        // ── Status bar at top ──
-        statusLabel = NSTextField(labelWithString: "Starting...")
-        statusLabel.frame = NSRect(x: 8, y: panelH - 36, width: panelW - 16, height: 16)
-        statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = .systemYellow
-        statusLabel.backgroundColor = .clear
-        contentView.addSubview(statusLabel)
+        // ── Header: project + model ──
+        headerLabel = makeLabel("ClaudeKey", size: 13, weight: .bold, color: .white)
+        headerLabel.frame = NSRect(x: 10, y: y, width: 200, height: 18)
+        cv.addSubview(headerLabel)
 
-        // ── Transcript display ──
-        transcriptLabel = NSTextField(labelWithString: "")
-        transcriptLabel.frame = NSRect(x: 8, y: panelH - 56, width: panelW - 16, height: 18)
-        transcriptLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        transcriptLabel.textColor = .white
-        transcriptLabel.backgroundColor = .clear
-        transcriptLabel.lineBreakMode = .byTruncatingTail
-        contentView.addSubview(transcriptLabel)
+        modelLabel = makeLabel("", size: 10, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
+        modelLabel.frame = NSRect(x: 10, y: y - 16, width: panelW - 20, height: 14)
+        cv.addSubview(modelLabel)
+        y -= 38
 
-        // ── Button grid: 3x2 ──
-        let btnDefs: [(String, Selector)] = [
-            ("🎙 PTT",    #selector(pttToggle)),
-            ("✓ Accept",  #selector(doAccept)),
-            ("✗ Reject",  #selector(doReject)),
-            ("↑ Up",      #selector(doUp)),
-            ("⚡ Auto",   #selector(doAutoYes)),
-            ("↓ Down",    #selector(doDown)),
+        // ── Buttons: 2 rows x 3 ──
+        let btnDefs: [(String, Selector, NSColor)] = [
+            ("🎙 PTT",    #selector(pttToggle), NSColor(white: 0.28, alpha: 1)),
+            ("✓ Accept",  #selector(doAccept),  NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1)),
+            ("✗ Reject",  #selector(doReject),  NSColor(red: 0.3, green: 0.15, blue: 0.15, alpha: 1)),
+            ("↑ Up",      #selector(doUp),      NSColor(white: 0.25, alpha: 1)),
+            ("⚡ Auto",   #selector(doAutoYes), NSColor(white: 0.25, alpha: 1)),
+            ("↓ Down",    #selector(doDown),    NSColor(white: 0.25, alpha: 1)),
         ]
+        let btnW: CGFloat = (panelW - 40) / 3
+        let btnH: CGFloat = 36
 
-        let cols = 3
-        let btnW: CGFloat = 76
-        let btnH: CGFloat = 40
-        let padX: CGFloat = 8
-        let padY: CGFloat = 6
-        let gridTop: CGFloat = panelH - 68
-
-        for (i, (title, action)) in btnDefs.enumerated() {
-            let col = i % cols
-            let row = i / cols
-            let bx = padX + CGFloat(col) * (btnW + padX)
-            let by = gridTop - CGFloat(row) * (btnH + padY) - btnH
+        for (i, (title, action, bgColor)) in btnDefs.enumerated() {
+            let col = i % 3
+            let row = i / 3
+            let bx = 10 + CGFloat(col) * (btnW + 5)
+            let by = y - CGFloat(row) * (btnH + 4)
 
             let btn = NonActivatingButton(frame: NSRect(x: bx, y: by, width: btnW, height: btnH))
-            btn.title = title
-            btn.target = self
-            btn.font = NSFont.systemFont(ofSize: 12, weight: .medium)
             btn.wantsLayer = true
-            btn.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor
+            btn.layer?.backgroundColor = bgColor.cgColor
             btn.layer?.cornerRadius = 6
             btn.isBordered = false
-            btn.attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .medium)]
-            )
-
-            btn.onPress = { [weak self] in
-                NSApp.sendAction(action, to: self, from: btn)
-            }
+            btn.attributedTitle = NSAttributedString(string: title,
+                attributes: [.foregroundColor: NSColor.white,
+                             .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+            btn.onPress = { [weak self] in NSApp.sendAction(action, to: self, from: btn) }
+            cv.addSubview(btn)
 
             if title.contains("PTT") { pttButton = btn }
-            contentView.addSubview(btn)
+            if title.contains("Accept") { acceptButton = btn }
         }
+        y -= (btnH * 2 + 4 + 12)
 
-        // ── Claude Code Status Area ──
-        let statusY: CGFloat = 8
+        // ── Divider ──
+        let div1 = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 1))
+        div1.wantsLayer = true
+        div1.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+        cv.addSubview(div1)
+        y -= 8
 
-        // Context bar background
-        ctxBarView = NSView(frame: NSRect(x: 8, y: statusY + 28, width: panelW - 60, height: 10))
+        // ── Context Window Bar ──
+        let ctxLbl = makeLabel("CONTEXT", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
+        ctxLbl.frame = NSRect(x: 10, y: y, width: 60, height: 12)
+        cv.addSubview(ctxLbl)
+
+        ctxLabel = makeLabel("—", size: 11, weight: .bold, color: .systemGreen)
+        ctxLabel.frame = NSRect(x: panelW - 60, y: y - 1, width: 50, height: 14)
+        ctxLabel.alignment = .right
+        cv.addSubview(ctxLabel)
+        y -= 14
+
+        ctxBarView = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 8))
         ctxBarView.wantsLayer = true
-        ctxBarView.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
-        ctxBarView.layer?.cornerRadius = 3
-        contentView.addSubview(ctxBarView)
+        ctxBarView.layer?.backgroundColor = NSColor(white: 0.22, alpha: 1).cgColor
+        ctxBarView.layer?.cornerRadius = 4
+        cv.addSubview(ctxBarView)
 
-        // Context bar fill
-        ctxBarFill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 10))
+        ctxBarFill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 8))
         ctxBarFill.wantsLayer = true
         ctxBarFill.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        ctxBarFill.layer?.cornerRadius = 3
+        ctxBarFill.layer?.cornerRadius = 4
         ctxBarView.addSubview(ctxBarFill)
+        y -= 16
 
-        // Context percentage label
-        ctxLabel = NSTextField(labelWithString: "—")
-        ctxLabel.frame = NSRect(x: panelW - 48, y: statusY + 26, width: 44, height: 14)
-        ctxLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .bold)
-        ctxLabel.textColor = .systemGreen
-        ctxLabel.alignment = .right
-        ctxLabel.backgroundColor = .clear
-        contentView.addSubview(ctxLabel)
+        // ── Rate Limits ──
+        let rateLbl = makeLabel("RATE LIMITS", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
+        rateLbl.frame = NSRect(x: 10, y: y, width: 80, height: 12)
+        cv.addSubview(rateLbl)
 
-        // Activity line (what Claude is doing right now)
-        activityLabel = NSTextField(labelWithString: "")
-        activityLabel.frame = NSRect(x: 8, y: statusY + 20, width: panelW - 16, height: 14)
-        activityLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
-        activityLabel.textColor = .systemCyan
-        activityLabel.backgroundColor = .clear
-        activityLabel.lineBreakMode = .byTruncatingTail
-        contentView.addSubview(activityLabel)
+        rateLabel = makeLabel("5h: —  |  7d: —", size: 10, weight: .regular, color: NSColor(white: 0.6, alpha: 1))
+        rateLabel.frame = NSRect(x: 90, y: y, width: panelW - 100, height: 12)
+        cv.addSubview(rateLabel)
+        y -= 14
 
-        // Info line: project | cost | rate limits
-        infoLabel = NSTextField(labelWithString: "Claude Code: waiting...")
-        infoLabel.frame = NSRect(x: 8, y: statusY + 4, width: panelW - 16, height: 14)
-        infoLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
-        infoLabel.textColor = NSColor(white: 0.6, alpha: 1)
-        infoLabel.backgroundColor = .clear
-        infoLabel.lineBreakMode = .byTruncatingTail
-        contentView.addSubview(infoLabel)
+        let halfW = (panelW - 25) / 2
+        rate5hBar = makeBar(x: 10, y: y, width: halfW)
+        cv.addSubview(rate5hBar)
+        rate5hFill = rate5hBar.subviews.first!
+
+        rate7dBar = makeBar(x: 15 + halfW, y: y, width: halfW)
+        cv.addSubview(rate7dBar)
+        rate7dFill = rate7dBar.subviews.first!
+        y -= 14
+
+        // ── Stats Line ──
+        statsLabel = makeLabel("", size: 9, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
+        statsLabel.frame = NSRect(x: 10, y: y, width: panelW - 20, height: 12)
+        cv.addSubview(statsLabel)
+        y -= 14
+
+        // ── Divider ──
+        let div2 = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 1))
+        div2.wantsLayer = true
+        div2.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+        cv.addSubview(div2)
+        y -= 4
+
+        // ── Activity Log Header ──
+        let logLbl = makeLabel("ACTIVITY", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
+        logLbl.frame = NSRect(x: 10, y: y, width: 80, height: 12)
+        cv.addSubview(logLbl)
+        y -= 4
+
+        // ── Activity Log (scrollable) ──
+        logView = NSScrollView(frame: NSRect(x: 10, y: 8, width: panelW - 20, height: y - 8))
+        logView.hasVerticalScroller = true
+        logView.borderType = .noBorder
+        logView.drawsBackground = false
+        logView.autoresizingMask = [.width, .height]
+
+        logText = NSTextView(frame: logView.bounds)
+        logText.isEditable = false
+        logText.isSelectable = true
+        logText.drawsBackground = false
+        logText.textContainerInset = NSSize(width: 2, height: 2)
+        logText.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        logText.textColor = NSColor(white: 0.6, alpha: 1)
+        logText.autoresizingMask = [.width]
+
+        logView.documentView = logText
+        cv.addSubview(logView)
 
         panel.orderFront(nil)
 
-        // ── Poll Claude Code status every 1s ──
+        // Poll every 1s
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateClaudeStatus()
         }
     }
 
-    // ── CLAUDE STATUS UPDATE ──────────────────────────
+    // ── HELPERS ────────────────────────────────────────
+    func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let l = NSTextField(labelWithString: text)
+        l.font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        l.textColor = color
+        l.backgroundColor = .clear
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }
+
+    func makeBar(x: CGFloat, y: CGFloat, width: CGFloat) -> NSView {
+        let bar = NSView(frame: NSRect(x: x, y: y, width: width, height: 6))
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = NSColor(white: 0.22, alpha: 1).cgColor
+        bar.layer?.cornerRadius = 3
+
+        let fill = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 6))
+        fill.wantsLayer = true
+        fill.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        fill.layer?.cornerRadius = 3
+        bar.addSubview(fill)
+        return bar
+    }
+
+    func logActivity(_ text: String, color: NSColor) {
+        let now = Date()
+        activityLog.append((now, text, color))
+        if activityLog.count > maxLogEntries { activityLog.removeFirst() }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let ts = formatter.string(from: now)
+
+        let line = NSMutableAttributedString()
+        line.append(NSAttributedString(string: "\(ts) ", attributes: [
+            .foregroundColor: NSColor(white: 0.4, alpha: 1),
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        ]))
+        line.append(NSAttributedString(string: "\(text)\n", attributes: [
+            .foregroundColor: color,
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        ]))
+
+        logText.textStorage?.append(line)
+
+        // Auto-scroll to bottom
+        logText.scrollToEndOfDocument(nil)
+    }
+
+    func barColor(for percent: Int) -> NSColor {
+        if percent < 25 { return .systemGreen }
+        if percent < 50 { return .systemBlue }
+        if percent < 75 { return .systemYellow }
+        return .systemRed
+    }
+
+    func styledTitle(_ text: String) -> NSAttributedString {
+        NSAttributedString(string: text,
+            attributes: [.foregroundColor: NSColor.white,
+                         .font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+    }
+
+    // ── STATUS UPDATE ──────────────────────────────────
     func updateClaudeStatus() {
         guard let s = ClaudeStatus.read() else { return }
 
-        // Context bar fill width
+        // Header
+        headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey" : s.project
+        modelLabel.stringValue = "\(s.model)  v\(s.version)"
+
+        // Context bar
         let barW = ctxBarView.frame.width
-        let fillW = barW * CGFloat(min(s.contextPercent, 100)) / 100.0
-        ctxBarFill.frame.size.width = fillW
+        ctxBarFill.frame.size.width = barW * CGFloat(min(s.contextPercent, 100)) / 100
+        let cc = barColor(for: s.contextPercent)
+        ctxBarFill.layer?.backgroundColor = cc.cgColor
+        ctxLabel.textColor = cc
 
-        // Color based on usage
-        let barColor: NSColor
-        if s.contextPercent < 25 {
-            barColor = .systemGreen
-        } else if s.contextPercent < 50 {
-            barColor = .systemBlue
-        } else if s.contextPercent < 75 {
-            barColor = .systemYellow
-        } else {
-            barColor = .systemRed
+        let tokensK = (s.inputTokens + s.outputTokens) / 1000
+        let ctxSizeK = s.contextWindowSize / 1000
+        ctxLabel.stringValue = "\(s.contextPercent)%  \(tokensK)k/\(ctxSizeK)k"
+
+        // Rate limits
+        rate5hFill.frame.size.width = rate5hBar.frame.width * CGFloat(min(s.rate5h, 100)) / 100
+        rate5hFill.layer?.backgroundColor = barColor(for: s.rate5h).cgColor
+        rate7dFill.frame.size.width = rate7dBar.frame.width * CGFloat(min(s.rate7d, 100)) / 100
+        rate7dFill.layer?.backgroundColor = barColor(for: s.rate7d).cgColor
+        rateLabel.stringValue = "5h: \(s.rate5h)%  |  7d: \(s.rate7d)%"
+
+        // Stats
+        let cost = String(format: "$%.2f", s.costUSD)
+        let dur = s.totalDurationMs / 1000
+        let cacheK = s.cacheReadTokens / 1000
+        statsLabel.stringValue = "\(cost) | \(dur)s | +\(s.linesAdded)/-\(s.linesRemoved) lines | cache: \(cacheK)k"
+
+        // Activity log (only add if new)
+        if !s.activity.isEmpty && s.activity != lastActivity {
+            lastActivity = s.activity
+            let color: NSColor = s.activityTool.contains("Agent") ? .systemPurple
+                : s.activityTool.contains("Bash") ? .systemOrange
+                : s.activityTool.contains("Write") || s.activityTool.contains("Edit") ? .systemYellow
+                : .systemCyan
+            logActivity(s.activity, color: color)
         }
-        ctxBarFill.layer?.backgroundColor = barColor.cgColor
-        ctxLabel.textColor = barColor
-        ctxLabel.stringValue = "\(s.contextPercent)%"
 
-        // Activity line
+        // Needs attention
         if s.needsAttention {
             blinkState.toggle()
-            activityLabel.stringValue = blinkState ? ">>> NEEDS APPROVAL <<<" : ""
-            activityLabel.textColor = .systemYellow
-            // Flash the Accept button
-            let acceptColor: NSColor = blinkState ? .systemGreen : NSColor(white: 0.3, alpha: 1)
-            // Find accept button and flash it
-            panel.contentView?.subviews.compactMap { $0 as? NonActivatingButton }.forEach {
-                if $0.title.contains("Accept") || $0.attributedTitle.string.contains("Accept") {
-                    $0.layer?.backgroundColor = acceptColor.cgColor
-                }
+            if blinkState {
+                logActivity(">>> NEEDS APPROVAL <<<", color: .systemYellow)
             }
-        } else if s.isIdle {
-            activityLabel.stringValue = "Waiting for input..."
-            activityLabel.textColor = .systemGreen
-        } else if !s.activity.isEmpty {
-            activityLabel.stringValue = s.activity
-            activityLabel.textColor = .systemCyan
-        } else {
-            activityLabel.stringValue = ""
-        }
-
-        // Info line
-        let cost = String(format: "$%.2f", s.costUSD)
-        infoLabel.stringValue = "\(s.project) | \(cost) | 5h:\(s.rate5h)% 7d:\(s.rate7d)%"
-
-        // Update menubar with context percentage
-        if s.needsAttention {
+            acceptButton.layer?.backgroundColor = blinkState
+                ? NSColor.systemGreen.cgColor
+                : NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1).cgColor
             statusItem.button?.title = blinkState ? "⚠️" : "⌨"
-        } else if !speech.isListening {
-            statusItem.button?.title = s.contextPercent > 75 ? "🔴" : "⌨"
+        } else if s.isIdle {
+            if lastActivity != "_idle" {
+                lastActivity = "_idle"
+                logActivity("Waiting for input...", color: .systemGreen)
+            }
+        } else {
+            acceptButton.layer?.backgroundColor = NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1).cgColor
+            if !speech.isListening {
+                statusItem.button?.title = s.contextPercent > 75 ? "🔴" : "⌨"
+            }
         }
     }
 
@@ -514,7 +597,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "⌨"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "ClaudeKey Soft v0.1", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "ClaudeKey Soft v0.2", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Show Panel", action: #selector(showPanel), keyEquivalent: "")
         menu.addItem(withTitle: "Hide Panel", action: #selector(hidePanel), keyEquivalent: "")
@@ -527,72 +610,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func hidePanel() { panel.orderOut(nil) }
     @objc func quit() { NSApp.terminate(nil) }
 
-    // ── ACTIONS ────────────────────────────────────────
+    // ── BUTTON ACTIONS ─────────────────────────────────
     @objc func doAccept() {
         typeString("y")
         usleep(20000)
-        sendKey(36)  // Enter
-        flashButton(statusLabel, text: "Sent: y + Enter", color: .systemGreen)
+        sendKey(36)
+        logActivity("Sent: y + Enter", color: .systemGreen)
+        // Clear needs-attention notification
+        try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
     }
 
     @objc func doReject() {
-        sendKey(53)  // Escape
-        flashButton(statusLabel, text: "Sent: Esc", color: .systemOrange)
+        sendKey(53)
+        logActivity("Sent: Esc", color: .systemOrange)
+        try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
     }
 
     @objc func doUp() {
-        sendKey(126)  // Up
-        flashButton(statusLabel, text: "Sent: Up", color: .systemBlue)
+        sendKey(126)
+        logActivity("Sent: Up", color: .systemBlue)
     }
 
     @objc func doDown() {
-        sendKey(125)  // Down
-        flashButton(statusLabel, text: "Sent: Down", color: .systemBlue)
+        sendKey(125)
+        logActivity("Sent: Down", color: .systemBlue)
     }
 
     @objc func pttToggle() {
         if speech.isListening {
-            // Stop recording → triggers recognition → onResult types text
             speech.stopRecording()
-            pttButton.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor
+            pttButton.layer?.backgroundColor = NSColor(white: 0.28, alpha: 1).cgColor
             pttButton.attributedTitle = styledTitle("🎙 PTT")
             statusItem.button?.title = "⌨"
-            setStatus("Recognizing...", color: .systemYellow)
-            transcriptLabel.stringValue = "(processing...)"
+            logActivity("PTT: recognizing...", color: .systemYellow)
         } else {
-            // Start recording
             let started = speech.startRecording()
             if started {
                 pttButton.layer?.backgroundColor = NSColor.systemRed.cgColor
                 pttButton.attributedTitle = styledTitle("⏹ STOP")
                 statusItem.button?.title = "🎙"
-                setStatus("Recording... click STOP when done", color: .systemRed)
-                transcriptLabel.stringValue = "(recording...)"
+                logActivity("PTT: recording...", color: .systemRed)
             }
         }
     }
 
     @objc func doAutoYes() {
-        setStatus("Auto-Yes: not implemented (v0.2)", color: .systemYellow)
-    }
-
-    // ── HELPERS ────────────────────────────────────────
-    func styledTitle(_ text: String) -> NSAttributedString {
-        NSAttributedString(
-            string: text,
-            attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 12, weight: .medium)]
-        )
-    }
-
-    func flashButton(_ label: NSTextField, text: String, color: NSColor) {
-        label.stringValue = text
-        label.textColor = color
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            if label.stringValue == text {
-                label.stringValue = "Ready"
-                label.textColor = .systemGreen
-            }
-        }
+        logActivity("Auto-Yes: coming in v0.2", color: .systemYellow)
     }
 }
 

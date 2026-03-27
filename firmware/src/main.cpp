@@ -2,12 +2,13 @@
  * ClaudeKey Firmware — ESP32-S3
  *
  * USB Composite Device: HID Keyboard + UAC Microphone
- * 6 mechanical keys + I2S MEMS mic (INMP441) + WS2812B LED strip
+ * 6 mechanical keys + I2S MEMS mic (INMP441) + WS2812B LED strip + buzzer
  *
  * Wiring:
  *   Keys: GPIO4-7,15,16 → switch → GND (internal pull-up)
  *   INMP441: WS→GPIO42, SCK→GPIO41, SD→GPIO40, L/R→GND, VDD→3.3V
  *   LED strip: DIN→GPIO48, VCC→3.3V, GND→GND
+ *   Buzzer: GPIO17 → passive buzzer → GND
  */
 
 #include <Arduino.h>
@@ -26,6 +27,10 @@ static const uint8_t NUM_PIXELS  = 8;
 static const uint8_t I2S_WS  = 42;  // Word Select (LRCK)
 static const uint8_t I2S_SCK = 41;  // Serial Clock (BCLK)
 static const uint8_t I2S_SD  = 40;  // Serial Data (DOUT)
+
+// Passive buzzer
+static const uint8_t BUZZER_PIN = 17;
+static const uint8_t BUZZER_CHANNEL = 0;
 
 // ── USB DESCRIPTORS ────────────────────────────────────
 Adafruit_USBD_HID usbHID;
@@ -70,6 +75,7 @@ String serialBuf;
 // ── FORWARD DECLARATIONS ───────────────────────────────
 void setupI2S();
 void setupKeys();
+void setupBuzzer();
 void scanKeys();
 void onKeyPress(uint8_t idx);
 void onKeyRelease(uint8_t idx);
@@ -78,6 +84,12 @@ void sendString(const char* str);
 void checkSerial();
 void updateLeds();
 void readMicAndSendUSB();
+void beep(uint16_t freq, uint16_t durationMs);
+void beepAccept();
+void beepReject();
+void beepPttStart();
+void beepPttStop();
+void beepAlert();
 
 // ── SETUP ──────────────────────────────────────────────
 void setup() {
@@ -92,6 +104,7 @@ void setup() {
 
     setupI2S();
     setupKeys();
+    setupBuzzer();
 
     pixels.begin();
     pixels.setBrightness(80);
@@ -155,15 +168,19 @@ void onKeyPress(uint8_t idx) {
     switch (idx) {
         case ACCEPT:
             sendString("y\n");
+            beepAccept();
             break;
         case REJECT:
             sendKey(HID_KEY_ESCAPE);
+            beepReject();
             break;
         case UP:
             sendKey(HID_KEY_ARROW_UP);
+            beep(800, 20);
             break;
         case DOWN:
             sendKey(HID_KEY_ARROW_DOWN);
+            beep(600, 20);
             break;
         case PTT:
             if (!pttHeld) {
@@ -171,9 +188,11 @@ void onKeyPress(uint8_t idx) {
                 uint8_t report[8] = {0};
                 report[2] = HID_KEY_F13;
                 usbHID.keyboardReport(0, 0, report+2);
+                beepPttStart();
             }
             break;
         case SPARE:
+            beep(440, 30);
             break;
     }
 }
@@ -182,6 +201,7 @@ void onKeyRelease(uint8_t idx) {
     if (idx == PTT && pttHeld) {
         pttHeld = false;
         usbHID.keyboardRelease(0);
+        beepPttStop();
     }
 }
 
@@ -212,6 +232,51 @@ void sendString(const char* str) {
             usbHID.keyboardRelease(0);
             delay(10);
         }
+    }
+}
+
+// ── BUZZER ─────────────────────────────────────────────
+void setupBuzzer() {
+    ledcAttach(BUZZER_PIN, 1000, 8);
+}
+
+void beep(uint16_t freq, uint16_t durationMs) {
+    ledcWriteTone(BUZZER_PIN, freq);
+    delay(durationMs);
+    ledcWriteTone(BUZZER_PIN, 0);
+}
+
+void beepAccept() {
+    // Short cheerful beep
+    beep(1200, 40);
+}
+
+void beepReject() {
+    // Two low beeps
+    beep(400, 60);
+    delay(40);
+    beep(300, 80);
+}
+
+void beepPttStart() {
+    // Rising tone
+    beep(600, 30);
+    beep(900, 30);
+    beep(1200, 30);
+}
+
+void beepPttStop() {
+    // Falling tone
+    beep(1200, 30);
+    beep(900, 30);
+    beep(600, 30);
+}
+
+void beepAlert() {
+    // Alarm: three fast high beeps
+    for (int i = 0; i < 3; i++) {
+        beep(2000, 80);
+        delay(60);
     }
 }
 
@@ -247,6 +312,14 @@ void checkSerial() {
             } else if (serialBuf.startsWith("M:")) {
                 char m = serialBuf.charAt(2);
                 if (m == 'b' || m == 's' || m == 'k') led.mode = m;
+            } else if (serialBuf.startsWith("A:")) {
+                // Audio alerts from macOS hooks
+                String alert = serialBuf.substring(2);
+                if (alert == "accept") beepAccept();
+                else if (alert == "reject") beepReject();
+                else if (alert == "alert") beepAlert();
+                else if (alert == "ptt_start") beepPttStart();
+                else if (alert == "ptt_stop") beepPttStop();
             }
             serialBuf = "";
         } else {

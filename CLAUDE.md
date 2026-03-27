@@ -34,18 +34,33 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
   Adjust GPIO numbers in firmware/src/main.cpp  3.3V ───── VDD
                                                 GND ────── GND
                                                 GND ────── L/R (left ch)
+
+                                                Passive Buzzer
+                                                ────────────────────
+                                                GPIO17 ─── + (signal)
+                                                GND ────── - (ground)
 ```
 
 ## Key Behavior
 
-| Key | HID Output | Notes |
-|-----|-----------|-------|
-| Accept | `y` + Enter | Direct to frontmost app |
-| Reject | Esc | Direct to frontmost app |
-| Up | Up arrow | Direct to frontmost app |
-| Down | Down arrow | Direct to frontmost app |
-| PTT | F13 → macOS app → Cmd+Shift+Space | WisprFlow PTT, mic on device |
-| Spare | (unassigned) | v0.2 |
+| Key | HID Output | Sound | Notes |
+|-----|-----------|-------|-------|
+| Accept | `y` + Enter | Short high beep | Direct to frontmost app |
+| Reject | Esc | Two low beeps | Direct to frontmost app |
+| Up | Up arrow | Soft click | Direct to frontmost app |
+| Down | Down arrow | Soft click | Direct to frontmost app |
+| PTT | F13 → macOS app → STT | Rising/falling tone | Hold=record, release=stop |
+| Spare | (unassigned) | Click | v0.2 |
+
+## Sound Effects
+
+| Event | Sound | Serial Command |
+|-------|-------|----------------|
+| Accept pressed | 1200Hz 40ms | `A:accept` |
+| Reject pressed | 400Hz+300Hz | `A:reject` |
+| PTT start | 600→900→1200Hz rising | `A:ptt_start` |
+| PTT stop | 1200→900→600Hz falling | `A:ptt_stop` |
+| Needs approval | 3x 2000Hz alarm | `A:alert` |
 
 ## LED Status (via Claude Code status hook)
 
@@ -133,8 +148,9 @@ scripts/
 | Kailh hot-swap sockets | 6 | ¥6-12 |
 | 1U keycaps (multi-color) | 6 | ¥12-30 |
 | INMP441 I2S MEMS mic | 1 | ¥5-8 |
+| Passive buzzer (3.3V) | 1 | ¥1-3 |
 | WS2812B LED strip (8 LED) | 1 | ¥10-15 |
 | Breadboard 400-hole | 1 | ¥5-10 |
 | Dupont jumper wires | 1 pack | ¥5-10 |
 | USB-C data cable | 1 | ¥10 |
-| **Total** | | **¥95-165** |
+| **Total** | | **¥96-168** |
