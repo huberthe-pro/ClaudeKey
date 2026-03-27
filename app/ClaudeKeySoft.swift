@@ -324,35 +324,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.minSize = NSSize(width: 300, height: 380)
 
         let cv = panel.contentView!
-        var y = panelH - 32
+        let pad: CGFloat = 10
+        let w = panelW - pad * 2  // usable width
 
-        // ── Header: project + model ──
+        // Layout top-down: y starts at top of content view and decreases
+        // Content view origin is bottom-left, so we compute from top
+        let contentH = cv.frame.height
+        var y = contentH
+
+        // ── Header ──
+        y -= 6  // top padding
+        y -= 18
         headerLabel = makeLabel("ClaudeKey", size: 13, weight: .bold, color: .white)
-        headerLabel.frame = NSRect(x: 10, y: y, width: 200, height: 18)
+        headerLabel.frame = NSRect(x: pad, y: y, width: w, height: 18)
         cv.addSubview(headerLabel)
 
-        modelLabel = makeLabel("", size: 10, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
-        modelLabel.frame = NSRect(x: 10, y: y - 16, width: panelW - 20, height: 14)
+        y -= 14
+        modelLabel = makeLabel("waiting for Claude Code...", size: 10, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
+        modelLabel.frame = NSRect(x: pad, y: y, width: w, height: 14)
         cv.addSubview(modelLabel)
-        y -= 38
 
-        // ── Buttons: 2 rows x 3 ──
+        // ── Buttons ──
+        y -= 8
         let btnDefs: [(String, Selector, NSColor)] = [
-            ("🎙 PTT",    #selector(pttToggle), NSColor(white: 0.28, alpha: 1)),
-            ("✓ Accept",  #selector(doAccept),  NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1)),
-            ("✗ Reject",  #selector(doReject),  NSColor(red: 0.3, green: 0.15, blue: 0.15, alpha: 1)),
-            ("↑ Up",      #selector(doUp),      NSColor(white: 0.25, alpha: 1)),
-            ("⚡ Always", #selector(doAlwaysAccept), NSColor(white: 0.25, alpha: 1)),
-            ("↓ Down",    #selector(doDown),    NSColor(white: 0.25, alpha: 1)),
+            ("🎙 PTT",     #selector(pttToggle),       NSColor(white: 0.28, alpha: 1)),
+            ("✓ Accept",   #selector(doAccept),         NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1)),
+            ("✗ Reject",   #selector(doReject),         NSColor(red: 0.3, green: 0.15, blue: 0.15, alpha: 1)),
+            ("↑ Up",       #selector(doUp),             NSColor(white: 0.25, alpha: 1)),
+            ("⚡ Always",  #selector(doAlwaysAccept),   NSColor(white: 0.25, alpha: 1)),
+            ("↓ Down",     #selector(doDown),           NSColor(white: 0.25, alpha: 1)),
         ]
-        let btnW: CGFloat = (panelW - 40) / 3
+        let btnGap: CGFloat = 5
+        let btnW = (w - btnGap * 2) / 3
         let btnH: CGFloat = 36
 
         for (i, (title, action, bgColor)) in btnDefs.enumerated() {
             let col = i % 3
             let row = i / 3
-            let bx = 10 + CGFloat(col) * (btnW + 5)
-            let by = y - CGFloat(row) * (btnH + 4)
+            let bx = pad + CGFloat(col) * (btnW + btnGap)
+            let by = y - CGFloat(row + 1) * btnH - CGFloat(row) * 4  // row+1 because y is top edge
 
             let btn = NonActivatingButton(frame: NSRect(x: bx, y: by, width: btnW, height: btnH))
             btn.wantsLayer = true
@@ -369,27 +379,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if title.contains("Accept") { acceptButton = btn }
             if title.contains("Always") { alwaysAcceptButton = btn }
         }
-        y -= (btnH * 2 + 4 + 12)
+        y -= btnH * 2 + 4 + 6  // 2 rows + gap + spacing
 
-        // ── Divider ──
-        let div1 = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 1))
-        div1.wantsLayer = true
-        div1.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
-        cv.addSubview(div1)
+        // ── Divider 1 ──
+        y -= 4
+        addDivider(cv, y: y)
         y -= 8
 
-        // ── Context Window Bar ──
+        // ── CONTEXT ──
+        y -= 12
         let ctxLbl = makeLabel("CONTEXT", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
-        ctxLbl.frame = NSRect(x: 10, y: y, width: 60, height: 12)
+        ctxLbl.frame = NSRect(x: pad, y: y, width: 60, height: 12)
         cv.addSubview(ctxLbl)
 
-        ctxLabel = makeLabel("—", size: 11, weight: .bold, color: .systemGreen)
-        ctxLabel.frame = NSRect(x: panelW - 60, y: y - 1, width: 50, height: 14)
+        ctxLabel = makeLabel("—", size: 10, weight: .bold, color: .systemGreen)
+        ctxLabel.frame = NSRect(x: pad + 60, y: y, width: w - 60, height: 12)
         ctxLabel.alignment = .right
         cv.addSubview(ctxLabel)
-        y -= 14
 
-        ctxBarView = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 8))
+        y -= 4
+        y -= 8
+        ctxBarView = NSView(frame: NSRect(x: pad, y: y, width: w, height: 8))
         ctxBarView.wantsLayer = true
         ctxBarView.layer?.backgroundColor = NSColor(white: 0.22, alpha: 1).cgColor
         ctxBarView.layer?.cornerRadius = 4
@@ -400,49 +410,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ctxBarFill.layer?.backgroundColor = NSColor.systemGreen.cgColor
         ctxBarFill.layer?.cornerRadius = 4
         ctxBarView.addSubview(ctxBarFill)
-        y -= 16
 
-        // ── Rate Limits ──
-        let rateLbl = makeLabel("RATE LIMITS", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
-        rateLbl.frame = NSRect(x: 10, y: y, width: 80, height: 12)
+        // ── RATE LIMITS ──
+        y -= 12
+        y -= 12
+        let rateLbl = makeLabel("RATE", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
+        rateLbl.frame = NSRect(x: pad, y: y, width: 40, height: 12)
         cv.addSubview(rateLbl)
 
         rateLabel = makeLabel("5h: —  |  7d: —", size: 10, weight: .regular, color: NSColor(white: 0.6, alpha: 1))
-        rateLabel.frame = NSRect(x: 90, y: y, width: panelW - 100, height: 12)
+        rateLabel.frame = NSRect(x: pad + 40, y: y, width: w - 40, height: 12)
+        rateLabel.alignment = .right
         cv.addSubview(rateLabel)
-        y -= 14
 
-        let halfW = (panelW - 25) / 2
-        rate5hBar = makeBar(x: 10, y: y, width: halfW)
+        y -= 4
+        y -= 6
+        let halfW = (w - 5) / 2
+        rate5hBar = makeBar(x: pad, y: y, width: halfW)
         cv.addSubview(rate5hBar)
         rate5hFill = rate5hBar.subviews.first!
 
-        rate7dBar = makeBar(x: 15 + halfW, y: y, width: halfW)
+        rate7dBar = makeBar(x: pad + halfW + 5, y: y, width: halfW)
         cv.addSubview(rate7dBar)
         rate7dFill = rate7dBar.subviews.first!
-        y -= 14
 
-        // ── Stats Line ──
+        // ── Stats ──
+        y -= 10
+        y -= 12
         statsLabel = makeLabel("", size: 9, weight: .regular, color: NSColor(white: 0.5, alpha: 1))
-        statsLabel.frame = NSRect(x: 10, y: y, width: panelW - 20, height: 12)
+        statsLabel.frame = NSRect(x: pad, y: y, width: w, height: 12)
         cv.addSubview(statsLabel)
-        y -= 14
 
-        // ── Divider ──
-        let div2 = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 1))
-        div2.wantsLayer = true
-        div2.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
-        cv.addSubview(div2)
-        y -= 4
+        // ── Divider 2 ──
+        y -= 6
+        addDivider(cv, y: y)
+        y -= 6
 
-        // ── Activity Log Header ──
+        // ── ACTIVITY header ──
+        y -= 12
         let logLbl = makeLabel("ACTIVITY", size: 9, weight: .bold, color: NSColor(white: 0.45, alpha: 1))
-        logLbl.frame = NSRect(x: 10, y: y, width: 80, height: 12)
+        logLbl.frame = NSRect(x: pad, y: y, width: 80, height: 12)
         cv.addSubview(logLbl)
-        y -= 4
 
-        // ── Activity Log (scrollable) ──
-        logView = NSScrollView(frame: NSRect(x: 10, y: 8, width: panelW - 20, height: y - 8))
+        // ── Activity Log (fills remaining space) ──
+        y -= 4
+        let logH = y - 6  // bottom padding
+        logView = NSScrollView(frame: NSRect(x: pad, y: 6, width: w, height: logH))
         logView.hasVerticalScroller = true
         logView.borderType = .noBorder
         logView.drawsBackground = false
@@ -466,6 +479,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateClaudeStatus()
         }
+    }
+
+    func addDivider(_ parent: NSView, y: CGFloat) {
+        let div = NSView(frame: NSRect(x: 10, y: y, width: panelW - 20, height: 1))
+        div.wantsLayer = true
+        div.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+        parent.addSubview(div)
     }
 
     // ── HELPERS ────────────────────────────────────────
