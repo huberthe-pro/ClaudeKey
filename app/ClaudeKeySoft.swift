@@ -13,120 +13,116 @@ import AVFoundation
 import Speech
 
 // ── SPEECH ENGINE ──────────────────────────────────────
-class SpeechEngine: NSObject {
+// Uses AVAudioRecorder (file-based) instead of AVAudioEngine.installTap
+// which has known NSException issues on macOS.
+class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     private var speechRecognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private let audioEngine = AVAudioEngine()
-    private(set) var currentTranscript = ""
+    private var recorder: AVAudioRecorder?
+    private var startTime: Date?
     private(set) var isListening = false
     var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
-    var onTranscriptUpdate: ((String) -> Void)?
     var onError: ((String) -> Void)?
+    var onResult: ((String) -> Void)?
+
+    private var tempFileURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claudekey_ptt.wav")
+    }
 
     override init() {
         super.init()
-        // Use system locale, fallback to en-US
-        speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
-            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
 
     func requestPermission(completion: @escaping (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 self.authStatus = status
-                let granted = (status == .authorized)
-                if !granted {
-                    let reason: String
-                    switch status {
-                    case .denied: reason = "Speech recognition denied in System Settings"
-                    case .restricted: reason = "Speech recognition restricted on this device"
-                    case .notDetermined: reason = "Speech permission not yet requested"
-                    default: reason = "Unknown speech permission status"
-                    }
-                    self.onError?(reason)
+                if status != .authorized {
+                    self.onError?("Speech permission denied. System Settings > Privacy > Speech Recognition")
                 }
-                completion(granted)
+                completion(status == .authorized)
             }
         }
     }
 
-    func startListening() -> Bool {
+    func startRecording() -> Bool {
+        NSLog("ClaudeKey: [PTT] start recording, auth=\(authStatus.rawValue)")
+
         guard authStatus == .authorized else {
-            onError?("Speech not authorized (status: \(authStatus.rawValue)). Check System Settings > Privacy > Speech Recognition")
+            onError?("Speech not authorized. System Settings > Privacy > Speech Recognition")
             return false
         }
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            onError?("Speech recognizer unavailable for locale: \(Locale.current.identifier)")
+            onError?("Speech recognizer unavailable")
             return false
         }
 
-        // Clean up any previous session
-        if isListening { cleanupAudio() }
-        currentTranscript = ""
-        isListening = true
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+        ]
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        recognitionRequest = request
-
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-
-        guard format.sampleRate > 0 else {
-            onError?("No audio input available. Check microphone permission.")
-            isListening = false
-            return false
-        }
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-        }
-
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self = self else { return }
-            if let result = result {
-                self.currentTranscript = result.bestTranscription.formattedString
-                DispatchQueue.main.async {
-                    self.onTranscriptUpdate?(self.currentTranscript)
-                }
-            }
-            if let error = error {
-                DispatchQueue.main.async {
-                    if self.isListening {
-                        self.onError?("Recognition error: \(error.localizedDescription)")
-                    }
-                }
-            }
-        }
-
-        audioEngine.prepare()
         do {
-            try audioEngine.start()
-            return true
+            recorder = try AVAudioRecorder(url: tempFileURL, settings: settings)
         } catch {
-            onError?("Mic failed to start: \(error.localizedDescription)")
-            cleanupAudio()
-            isListening = false
+            NSLog("ClaudeKey: [PTT] AVAudioRecorder init failed: \(error)")
+            onError?("Mic init failed: \(error.localizedDescription)")
             return false
         }
+
+        recorder?.delegate = self
+        guard recorder?.record() == true else {
+            NSLog("ClaudeKey: [PTT] record() returned false")
+            onError?("Mic failed to start recording")
+            return false
+        }
+
+        isListening = true
+        startTime = Date()
+        NSLog("ClaudeKey: [PTT] RECORDING to \(tempFileURL.lastPathComponent)")
+        return true
     }
 
-    @discardableResult
-    func stopListening() -> String {
-        let transcript = currentTranscript
-        cleanupAudio()
+    func stopRecording() {
+        guard isListening else { return }
+        let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
+        NSLog("ClaudeKey: [PTT] stop recording, duration=%.1fs", duration)
+
+        recorder?.stop()
+        recorder = nil
         isListening = false
-        return transcript
-    }
 
-    private func cleanupAudio() {
-        if audioEngine.isRunning { audioEngine.stop() }
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        guard duration > 0.3 else {
+            NSLog("ClaudeKey: [PTT] too short (< 0.3s), skipping recognition")
+            onError?("Recording too short")
+            return
+        }
+
+        // Recognize the recorded file
+        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
+            onError?("Speech recognizer unavailable")
+            return
+        }
+
+        let request = SFSpeechURLRecognitionRequest(url: tempFileURL)
+        NSLog("ClaudeKey: [PTT] recognizing...")
+
+        recognizer.recognitionTask(with: request) { [weak self] result, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    NSLog("ClaudeKey: [PTT] recognition error: \(error.localizedDescription)")
+                    self?.onError?("Recognition failed: \(error.localizedDescription)")
+                    return
+                }
+                guard let result = result, result.isFinal else { return }
+                let text = result.bestTranscription.formattedString
+                NSLog("ClaudeKey: [PTT] recognized: \"\(text)\"")
+                self?.onResult?(text)
+            }
+        }
     }
 }
 
@@ -210,9 +206,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Request speech permission
         speech.onError = { [weak self] msg in
             self?.setStatus(msg, color: .systemRed)
+            self?.transcriptLabel.stringValue = ""
         }
-        speech.onTranscriptUpdate = { [weak self] text in
-            self?.transcriptLabel.stringValue = text.isEmpty ? "(listening...)" : text
+        speech.onResult = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            self.setStatus("Typing: \(text)", color: .systemGreen)
+            self.transcriptLabel.stringValue = text
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                typeString(text)
+                sendKey(36) // Enter
+                self.setStatus("Ready", color: .systemGreen)
+            }
         }
         speech.requestPermission { [weak self] granted in
             guard let self = self else { return }
@@ -367,35 +371,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func pttToggle() {
         if speech.isListening {
-            // Stop recording, get transcript, type it
-            let text = speech.stopListening()
+            // Stop recording → triggers recognition → onResult types text
+            speech.stopRecording()
             pttButton.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor
             pttButton.attributedTitle = styledTitle("🎙 PTT")
             statusItem.button?.title = "⌨"
-
-            if text.isEmpty {
-                setStatus("No speech detected", color: .systemYellow)
-                transcriptLabel.stringValue = ""
-            } else {
-                setStatus("Typing: \(text)", color: .systemGreen)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    typeString(text)
-                    sendKey(36)  // Enter
-                    self.setStatus("Ready", color: .systemGreen)
-                    self.transcriptLabel.stringValue = ""
-                }
-            }
+            setStatus("Recognizing...", color: .systemYellow)
+            transcriptLabel.stringValue = "(processing...)"
         } else {
             // Start recording
-            transcriptLabel.stringValue = "(listening...)"
-            let started = speech.startListening()
+            let started = speech.startRecording()
             if started {
                 pttButton.layer?.backgroundColor = NSColor.systemRed.cgColor
                 pttButton.attributedTitle = styledTitle("⏹ STOP")
                 statusItem.button?.title = "🎙"
                 setStatus("Recording... click STOP when done", color: .systemRed)
+                transcriptLabel.stringValue = "(recording...)"
             }
-            // If !started, speech.onError already called setStatus
         }
     }
 
