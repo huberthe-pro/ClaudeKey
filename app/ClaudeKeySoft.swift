@@ -267,9 +267,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer?
     var blinkState = false
     var lastActivity = ""
-    var autoYesTimer: Timer?
-    var autoYesCount = 0
-    var autoYesButton: NonActivatingButton!
+    var alwaysAccept = false
+    var alwaysAcceptCount = 0
+    var alwaysAcceptButton: NonActivatingButton!
 
     let panelW: CGFloat = 360
     let panelH: CGFloat = 480
@@ -342,7 +342,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ("✓ Accept",  #selector(doAccept),  NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1)),
             ("✗ Reject",  #selector(doReject),  NSColor(red: 0.3, green: 0.15, blue: 0.15, alpha: 1)),
             ("↑ Up",      #selector(doUp),      NSColor(white: 0.25, alpha: 1)),
-            ("⚡ Auto",   #selector(doAutoYes), NSColor(white: 0.25, alpha: 1)),
+            ("⚡ Always", #selector(doAlwaysAccept), NSColor(white: 0.25, alpha: 1)),
             ("↓ Down",    #selector(doDown),    NSColor(white: 0.25, alpha: 1)),
         ]
         let btnW: CGFloat = (panelW - 40) / 3
@@ -367,7 +367,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             if title.contains("PTT") { pttButton = btn }
             if title.contains("Accept") { acceptButton = btn }
-            if title.contains("Auto") { autoYesButton = btn }
+            if title.contains("Always") { alwaysAcceptButton = btn }
         }
         y -= (btnH * 2 + 4 + 12)
 
@@ -574,6 +574,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Needs attention
         if s.needsAttention {
+            if alwaysAccept {
+                // Auto-accept: send Enter immediately
+                alwaysAcceptCount += 1
+                sendKey(36)
+                try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
+                logActivity("Auto-accept #\(alwaysAcceptCount): Enter", color: .systemGreen)
+                return
+            }
             blinkState.toggle()
             if blinkState {
                 logActivity(">>> NEEDS APPROVAL <<<", color: .systemYellow)
@@ -655,28 +663,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func doAutoYes() {
-        if autoYesTimer != nil {
-            // Stop auto mode
-            autoYesTimer?.invalidate()
-            autoYesTimer = nil
-            autoYesButton.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
-            autoYesButton.attributedTitle = styledTitle("⚡ Auto")
-            logActivity("Auto-Yes OFF (sent \(autoYesCount)x)", color: .systemYellow)
-            autoYesCount = 0
+    @objc func doAlwaysAccept() {
+        alwaysAccept.toggle()
+        if alwaysAccept {
+            alwaysAcceptCount = 0
+            alwaysAcceptButton.layer?.backgroundColor = NSColor.systemRed.cgColor
+            alwaysAcceptButton.attributedTitle = styledTitle("⏹ Stop")
+            logActivity("Always-Accept ON — auto Enter on approval requests", color: .systemRed)
         } else {
-            // Start auto mode: send Enter every 2 seconds
-            autoYesCount = 0
-            autoYesButton.layer?.backgroundColor = NSColor.systemRed.cgColor
-            autoYesButton.attributedTitle = styledTitle("⏹ Stop")
-            logActivity("Auto-Yes ON — sending Enter every 2s", color: .systemRed)
-            autoYesTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                guard let self = self else { return }
-                self.autoYesCount += 1
-                sendKey(36)  // Enter
-                try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
-                self.logActivity("Auto #\(self.autoYesCount): Enter", color: NSColor(white: 0.45, alpha: 1))
-            }
+            alwaysAcceptButton.layer?.backgroundColor = NSColor(white: 0.25, alpha: 1).cgColor
+            alwaysAcceptButton.attributedTitle = styledTitle("⚡ Always")
+            logActivity("Always-Accept OFF (auto-accepted \(alwaysAcceptCount)x)", color: .systemYellow)
         }
     }
 }
