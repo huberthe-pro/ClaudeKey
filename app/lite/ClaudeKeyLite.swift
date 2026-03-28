@@ -22,42 +22,17 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
     var onError:  ((String) -> Void)?
     var onResult: ((String) -> Void)?
-    var onLog:    ((String) -> Void)?   // daemon status messages
-
-    // whisper-daemon script (persistent process, lazy-loaded)
-    private let whisperDaemonScript: String?
-
-    // Daemon process state
-    private var daemonProcess: Process?
-    private var daemonStdin: FileHandle?
-    private var daemonOutputBuffer = ""
-    private var daemonReady = false
-    private var pendingAudio: URL?          // queued while daemon is warming up
-    private var idleTimer: Timer?
-    private let idleTimeout: TimeInterval = 600  // 10 min idle → kill → free ~800MB
 
     private var tempFileURL: URL {
         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claudekey_ptt.wav")
     }
 
     override init() {
-        let bin = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
-            .resolvingSymlinksInPath()
-        let candidates = (1...4).map { depth -> String in
-            var u = bin
-            for _ in 0..<depth { u = u.deletingLastPathComponent() }
-            return u.appendingPathComponent("scripts/whisper-daemon").path
-        }
-        whisperDaemonScript = candidates.first {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }
         super.init()
         speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
             ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
             ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
-
-    deinit { killDaemon() }
 
     func requestPermission(completion: @escaping (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { status in
@@ -70,8 +45,7 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     }
 
     var backendDescription: String {
-        if whisperDaemonScript != nil { return "Whisper daemon (loads on first PTT)" }
-        return "Apple STT (\(Locale.current.identifier))"
+        "Apple STT (\(Locale.current.identifier))"
     }
 
     func startRecording() -> Bool {
@@ -95,113 +69,10 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
         let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
         recorder?.stop(); recorder = nil; isListening = false
         guard duration > 0.3 else { onError?("Recording too short"); return }
-
-        let fileURL = tempFileURL
-        if whisperDaemonScript != nil {
-            if daemonProcess == nil {
-                startDaemon()           // lazy: first PTT starts the daemon
-                pendingAudio = fileURL  // queued until READY
-            } else if daemonReady {
-                sendToDaemon(fileURL: fileURL)
-                resetIdleTimer()
-            } else {
-                pendingAudio = fileURL  // daemon still warming up
-            }
-        } else {
-            transcribeWithApple(fileURL: fileURL)
-        }
+        transcribe(fileURL: tempFileURL)
     }
 
-    // MARK: — Daemon lifecycle
-
-    private func startDaemon() {
-        guard let script = whisperDaemonScript, daemonProcess == nil else { return }
-        onLog?("STT: Whisper loading model…")
-
-        let process   = Process()
-        let stdinPipe  = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.executableURL  = URL(fileURLWithPath: script)
-        process.standardInput  = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError  = stderrPipe
-
-        // stderr: watch for "READY" (emitted after model pre-warm)
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
-            guard str.contains("READY") else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.daemonReady = true
-                self.onLog?("STT: Whisper ready ✓")
-                if let pending = self.pendingAudio {
-                    self.pendingAudio = nil
-                    self.sendToDaemon(fileURL: pending)
-                    self.resetIdleTimer()
-                }
-            }
-        }
-
-        // stdout: line-buffer transcription results
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.daemonOutputBuffer += chunk
-                while let nl = self.daemonOutputBuffer.firstIndex(of: "\n") {
-                    let line = String(self.daemonOutputBuffer[..<nl])
-                        .trimmingCharacters(in: .whitespaces)
-                    self.daemonOutputBuffer = String(
-                        self.daemonOutputBuffer[self.daemonOutputBuffer.index(after: nl)...])
-                    if !line.isEmpty { self.onResult?(line) }
-                }
-            }
-        }
-
-        process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async { [weak self] in
-                self?.daemonProcess = nil
-                self?.daemonStdin   = nil
-                self?.daemonReady   = false
-                self?.daemonOutputBuffer = ""
-            }
-        }
-
-        do {
-            try process.run()
-            daemonProcess = process
-            daemonStdin   = stdinPipe.fileHandleForWriting
-        } catch {
-            onError?("Whisper daemon launch failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func sendToDaemon(fileURL: URL) {
-        guard let handle = daemonStdin else { return }
-        handle.write((fileURL.path + "\n").data(using: .utf8)!)
-    }
-
-    private func killDaemon() {
-        idleTimer?.invalidate(); idleTimer = nil
-        daemonStdin = nil
-        daemonProcess?.terminate(); daemonProcess = nil
-        daemonReady = false; daemonOutputBuffer = ""; pendingAudio = nil
-    }
-
-    private func resetIdleTimer() {
-        idleTimer?.invalidate()
-        idleTimer = Timer.scheduledTimer(withTimeInterval: idleTimeout, repeats: false) { [weak self] _ in
-            self?.killDaemon()
-            self?.onLog?("STT: Whisper idle — memory freed (reload on next PTT)")
-        }
-    }
-
-    // MARK: — Apple STT fallback (no whisper-daemon found)
-
-    private func transcribeWithApple(fileURL: URL) {
+    private func transcribe(fileURL: URL) {
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
             onError?("Speech recognizer unavailable"); return
         }
@@ -405,9 +276,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 typeString(text)
                 sendKey(36)
             }
-        }
-        speech.onLog = { [weak self] msg in
-            self?.logActivity(msg, color: .systemGray)
         }
         speech.requestPermission { [weak self] granted in
             guard let self = self else { return }

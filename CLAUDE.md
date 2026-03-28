@@ -167,67 +167,18 @@ In WisprFlow settings, select "ClaudeKey" (or the ESP32-S3 USB audio device) as 
 
 ## PTT 语音识别说明
 
-### STT 后端优先级
-
-App 启动时自动检测可用后端，Activity Log 会显示实际使用的引擎：
+使用 Apple `SFSpeechRecognizer`，跟随系统语言，零安装，延迟 ~0.5s。
 
 ```
-STT: Whisper (whisper-stt)        ← 安装了 mlx-whisper（推荐）
-STT: Apple STT (zh_CN)            ← 未安装 mlx-whisper，使用系统识别
+Locale.current → zh-CN → en-US（依次降级）
 ```
-
-**优先级链：**
-
-```
-scripts/whisper-stt 存在且可执行？
-    ├─ Yes → mlx-whisper 转录（真正的中英混合识别）
-    │           └─ 失败/未安装 → 降级到 Apple STT
-    └─ No  → Apple SFSpeechRecognizer
-                  Locale.current → zh-CN → en-US
-```
-
-### 方案对比
-
-| | Apple STT | mlx-whisper |
-|---|---|---|
-| 中英混合 | 部分（依赖系统语言模型） | ✓ 原生支持 |
-| 离线 | ✓ | ✓ |
-| 延迟 | ~0.5s | ~1-2s (Apple Silicon) |
-| 安装 | 零 | `pip install mlx-whisper` |
-| 模型大小 | 系统内置 | ~800MB（首次下载） |
-
-### 安装 mlx-whisper（推荐，Apple Silicon）
-
-```bash
-pip install mlx-whisper
-
-# 验证安装
-python3 -c "import mlx_whisper; print('ok')"
-```
-
-安装后重启 App 即自动切换。可通过环境变量指定模型：
-
-```bash
-# 默认：mlx-community/whisper-large-v3-turbo（最准确）
-# 改用较小模型节省磁盘：
-export CLAUDEKEY_WHISPER_MODEL="mlx-community/whisper-small"
-./ClaudeKeyLite
-```
-
-| 模型 | 大小 | 速度 | 适合 |
-|------|------|------|------|
-| `whisper-small` | ~250MB | 最快 | 日常轻量 |
-| `whisper-medium` | ~750MB | 快 | 平衡 |
-| `whisper-large-v3-turbo` | ~800MB | 稍慢 | **默认，最准** |
 
 ### 常见问题
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 只识别英文 | 未装 mlx-whisper，系统语言是 English | `pip install mlx-whisper` 或切换系统语言为简体中文 |
+| 只识别英文 | 系统语言设置为 English | 系统设置 → 语言与地区 → 首选语言改为简体中文 |
 | PTT 按下无反应 | 未授权麦克风/语音识别权限 | 系统设置 → 隐私与安全性 → 麦克风 / 语音识别 |
-| 首次 Whisper 很慢 | 正在下载模型（~800MB） | 等待下载完成，后续正常 |
-| 识别结果乱码 | Locale 不匹配 | 安装 mlx-whisper 彻底解决 |
 
 ## Project Structure
 
@@ -251,8 +202,7 @@ ClaudeKey/
 │   ├── claude-status-hook    Claude Code status → LED/OLED (required)
 │   ├── claude-notify-hook    Approval/idle notifications
 │   ├── claude-tool-hook      Tool activity logging
-│   ├── claude-status-dump    Debug: dump last status JSON
-│   └── whisper-stt           mlx-whisper STT backend (optional)
+│   └── claude-status-dump    Debug: dump last status JSON
 └── docs/
     └── claude-code-hooks-reference.md
 ```
@@ -270,7 +220,6 @@ ClaudeKey/
 
 | 功能 | 完成时间 |
 |------|---------|
-| mlx-whisper STT backend（中英混合识别） | 2026-03-27 |
 | Hook 自动修复（Fix Hook 菜单） | 2026-03-27 |
 | Lite / Pro 双版本架构 | 2026-03-27 |
 | OLED 2.42" 128x64 显示方案 | 2026-03-27 |
