@@ -388,13 +388,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         y -= 8
 
-        // ── Section 5: LED strip indicator ──
-        let ledStrip = OLEDLEDStrip(frame: NSRect(x: pad, y: y - 6, width: w, height: 6))
-        ledStrip.wantsLayer = true
-        cv.addSubview(ledStrip)
-        y -= 12
-
-        // ── Section 6: Divider + Activity ──
+        // ── Section 5: Divider + Activity ──
         addDivider(cv, y: y - 2)
         y -= 8
 
@@ -703,26 +697,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // ── LED STRIP INDICATOR (bottom edge) ─────────────────
-class OLEDLEDStrip: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        // Read last known context percent from status file
-        var pct = 0
-        if let d = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
-           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-           let cw = j["context_window"] as? [String: Any] {
-            pct = cw["used_percentage"] as? Int ?? 0
-        }
-        let color: NSColor = pct < 25 ? .systemGreen
-                           : pct < 50 ? .systemBlue
-                           : pct < 75 ? .systemYellow : .systemRed
-        // Glow strip
-        let gradient = NSGradient(colors: [
-            NSColor.black, color.withAlphaComponent(0.8), NSColor.black
-        ], atLocations: [0, 0.5, 1], colorSpace: .deviceRGB)
-        gradient?.draw(in: bounds, angle: 0)
-    }
-}
-
 // ── MAIN ───────────────────────────────────────────────
 @main
 enum Main {
