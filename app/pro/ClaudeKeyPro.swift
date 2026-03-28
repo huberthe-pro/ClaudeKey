@@ -28,16 +28,35 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     private var startTime: Date?
     private let tempFileURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("claudekey-pro-stt.wav")
+    private let whisperScript: String?
 
     var isListening = false
     var onResult: ((String) -> Void)?
     var onError:  ((String) -> Void)?
 
-    func requestPermission(completion: @escaping (Bool) -> Void) {
-        // Use system locale → supports zh-CN/en-US mixed input
+    override init() {
+        let bin = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .resolvingSymlinksInPath()
+        let candidates = (1...4).map { depth -> String in
+            var u = bin
+            for _ in 0..<depth { u = u.deletingLastPathComponent() }
+            return u.appendingPathComponent("scripts/whisper-stt").path
+        }
+        whisperScript = candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+        super.init()
         speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
             ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
             ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    }
+
+    var backendDescription: String {
+        if let s = whisperScript { return "Whisper (\(s.components(separatedBy: "/").last ?? ""))" }
+        return "Apple STT (\(Locale.current.identifier))"
+    }
+
+    func requestPermission(completion: @escaping (Bool) -> Void) {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async { completion(status == .authorized) }
         }
@@ -63,8 +82,49 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
         let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
         recorder?.stop(); recorder = nil; isListening = false
         guard duration > 0.3 else { onError?("Too short"); return }
-        guard let r = speechRecognizer, r.isAvailable else { onError?("Recognizer unavailable"); return }
-        let req = SFSpeechURLRecognitionRequest(url: tempFileURL)
+
+        let fileURL = tempFileURL
+        if let script = whisperScript {
+            transcribeWithWhisper(script: script, fileURL: fileURL)
+        } else {
+            transcribeWithApple(fileURL: fileURL)
+        }
+    }
+
+    private func transcribeWithWhisper(script: String, fileURL: URL) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: script)
+            proc.arguments = [fileURL.path]
+            let outPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError  = Pipe()
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let text = String(
+                    data: outPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                DispatchQueue.main.async {
+                    if proc.terminationStatus == 0 && !text.isEmpty {
+                        self?.onResult?(text)
+                    } else {
+                        // exit 2 = not installed, others = error; fall back either way
+                        self?.transcribeWithApple(fileURL: fileURL)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { self?.transcribeWithApple(fileURL: fileURL) }
+            }
+        }
+    }
+
+    private func transcribeWithApple(fileURL: URL) {
+        guard let r = speechRecognizer, r.isAvailable else {
+            onError?("Recognizer unavailable"); return
+        }
+        let req = SFSpeechURLRecognitionRequest(url: fileURL)
         r.recognitionTask(with: req) { [weak self] result, error in
             DispatchQueue.main.async {
                 if let e = error { self?.onError?("STT: \(e.localizedDescription)"); return }
@@ -418,7 +478,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { typeString(t); sendKey(36) }
         }
         speech.requestPermission { [weak self] ok in
-            self?.log(ok ? "Speech ready" : "Speech permission denied", ok ? .systemGreen : .systemRed)
+            guard let self = self else { return }
+            if ok {
+                self.log("STT: \(self.speech.backendDescription)", .systemGreen)
+            } else {
+                self.log("Speech permission denied", .systemRed)
+            }
         }
         checkHookStatus()
         log("ClaudeKey Pro ready", .systemGreen)

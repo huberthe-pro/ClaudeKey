@@ -20,16 +20,31 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     private var startTime: Date?
     private(set) var isListening = false
     var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
-    var onError: ((String) -> Void)?
+    var onError:  ((String) -> Void)?
     var onResult: ((String) -> Void)?
+
+    // whisper-stt script path (resolved at init)
+    private let whisperScript: String?
 
     private var tempFileURL: URL {
         URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claudekey_ptt.wav")
     }
 
     override init() {
+        // Resolve whisper-stt from binary location (handles all three app depths)
+        let bin = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+            .resolvingSymlinksInPath()
+        let candidates = (1...4).map { depth -> String in
+            var u = bin
+            for _ in 0..<depth { u = u.deletingLastPathComponent() }
+            return u.appendingPathComponent("scripts/whisper-stt").path
+        }
+        whisperScript = candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }
+
         super.init()
-        // Use system locale → supports zh-CN/en-US mixed input
+        // Follow system locale; Whisper handles mixed zh/en natively
         speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
             ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
             ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -39,24 +54,14 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 self.authStatus = status
-                if status != .authorized {
-                    self.onError?("Speech permission denied")
-                }
+                if status != .authorized { self.onError?("Speech permission denied") }
                 completion(status == .authorized)
             }
         }
     }
 
     func startRecording() -> Bool {
-        guard authStatus == .authorized else {
-            onError?("Speech not authorized")
-            return false
-        }
-        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            onError?("Speech recognizer unavailable")
-            return false
-        }
-
+        guard authStatus == .authorized else { onError?("Speech not authorized"); return false }
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVSampleRateKey: 16000.0,
@@ -64,54 +69,83 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
         ]
-
-        do {
-            recorder = try AVAudioRecorder(url: tempFileURL, settings: settings)
-        } catch {
-            onError?("Mic init failed: \(error.localizedDescription)")
-            return false
-        }
-
+        do { recorder = try AVAudioRecorder(url: tempFileURL, settings: settings) }
+        catch { onError?("Mic init failed: \(error.localizedDescription)"); return false }
         recorder?.delegate = self
-        guard recorder?.record() == true else {
-            onError?("Mic failed to start")
-            return false
-        }
-
-        isListening = true
-        startTime = Date()
-        return true
+        guard recorder?.record() == true else { onError?("Mic failed to start"); return false }
+        isListening = true; startTime = Date(); return true
     }
 
     func stopRecording() {
         guard isListening else { return }
         let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
+        recorder?.stop(); recorder = nil; isListening = false
+        guard duration > 0.3 else { onError?("Recording too short"); return }
 
-        recorder?.stop()
-        recorder = nil
-        isListening = false
-
-        guard duration > 0.3 else {
-            onError?("Recording too short")
-            return
+        let fileURL = tempFileURL
+        if let script = whisperScript {
+            // ── Primary: mlx-whisper (true zh/en mixed recognition) ──
+            transcribeWithWhisper(script: script, fileURL: fileURL)
+        } else {
+            // ── Fallback: Apple SFSpeechRecognizer ──
+            transcribeWithApple(fileURL: fileURL)
         }
+    }
 
+    private func transcribeWithWhisper(script: String, fileURL: URL) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: script)
+            proc.arguments = [fileURL.path]
+            let outPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError  = Pipe()   // suppress stderr noise
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let text = String(
+                    data: outPipe.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                DispatchQueue.main.async {
+                    switch proc.terminationStatus {
+                    case 0 where !text.isEmpty:
+                        self?.onResult?(text)          // Whisper succeeded
+                    case 2:
+                        // Exit 2 = mlx_whisper not installed → fall back silently
+                        self?.transcribeWithApple(fileURL: fileURL)
+                    default:
+                        // Other error → fall back
+                        self?.transcribeWithApple(fileURL: fileURL)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { self?.transcribeWithApple(fileURL: fileURL) }
+            }
+        }
+    }
+
+    private func transcribeWithApple(fileURL: URL) {
         guard let recognizer = speechRecognizer, recognizer.isAvailable else {
-            onError?("Speech recognizer unavailable")
-            return
+            onError?("Speech recognizer unavailable"); return
         }
-
-        let request = SFSpeechURLRecognitionRequest(url: tempFileURL)
-        recognizer.recognitionTask(with: request) { [weak self] result, error in
+        let req = SFSpeechURLRecognitionRequest(url: fileURL)
+        recognizer.recognitionTask(with: req) { [weak self] result, error in
             DispatchQueue.main.async {
                 if let error = error {
-                    self?.onError?("Recognition failed: \(error.localizedDescription)")
-                    return
+                    self?.onError?("Recognition failed: \(error.localizedDescription)"); return
                 }
                 guard let result = result, result.isFinal else { return }
                 self?.onResult?(result.bestTranscription.formattedString)
             }
         }
+    }
+
+    // Called by AppDelegate to show backend in log
+    var backendDescription: String {
+        if let s = whisperScript { return "Whisper (\(s.components(separatedBy: "/").last ?? ""))" }
+        return "Apple STT (\(Locale.current.identifier))"
     }
 }
 
@@ -304,8 +338,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         speech.requestPermission { [weak self] granted in
-            self?.logActivity(granted ? "Speech ready" : "Speech permission denied",
-                              color: granted ? .systemGreen : .systemRed)
+            guard let self = self else { return }
+            if granted {
+                self.logActivity("STT: \(self.speech.backendDescription)", color: .systemGreen)
+            } else {
+                self.logActivity("Speech permission denied", color: .systemRed)
+            }
         }
 
         checkHookStatus()

@@ -167,24 +167,67 @@ In WisprFlow settings, select "ClaudeKey" (or the ESP32-S3 USB audio device) as 
 
 ## PTT 语音识别说明
 
-PTT 按钮使用 macOS 原生 `SFSpeechRecognizer`，语言跟随系统设置：
+### STT 后端优先级
+
+App 启动时自动检测可用后端，Activity Log 会显示实际使用的引擎：
 
 ```
-Locale.current (macOS 系统语言)
-    └─ 不可用 → zh-CN
-        └─ 不可用 → en-US (最终兜底)
+STT: Whisper (whisper-stt)        ← 安装了 mlx-whisper（推荐）
+STT: Apple STT (zh_CN)            ← 未安装 mlx-whisper，使用系统识别
 ```
 
-**支持中英文混合输入**：macOS 系统语言设为「简体中文」时，可以直接说中文或中英混合句子，识别结果会自动输入到当前焦点窗口。
+**优先级链：**
 
-**常见问题**：
+```
+scripts/whisper-stt 存在且可执行？
+    ├─ Yes → mlx-whisper 转录（真正的中英混合识别）
+    │           └─ 失败/未安装 → 降级到 Apple STT
+    └─ No  → Apple SFSpeechRecognizer
+                  Locale.current → zh-CN → en-US
+```
+
+### 方案对比
+
+| | Apple STT | mlx-whisper |
+|---|---|---|
+| 中英混合 | 部分（依赖系统语言模型） | ✓ 原生支持 |
+| 离线 | ✓ | ✓ |
+| 延迟 | ~0.5s | ~1-2s (Apple Silicon) |
+| 安装 | 零 | `pip install mlx-whisper` |
+| 模型大小 | 系统内置 | ~800MB（首次下载） |
+
+### 安装 mlx-whisper（推荐，Apple Silicon）
+
+```bash
+pip install mlx-whisper
+
+# 验证安装
+python3 -c "import mlx_whisper; print('ok')"
+```
+
+安装后重启 App 即自动切换。可通过环境变量指定模型：
+
+```bash
+# 默认：mlx-community/whisper-large-v3-turbo（最准确）
+# 改用较小模型节省磁盘：
+export CLAUDEKEY_WHISPER_MODEL="mlx-community/whisper-small"
+./ClaudeKeyLite
+```
+
+| 模型 | 大小 | 速度 | 适合 |
+|------|------|------|------|
+| `whisper-small` | ~250MB | 最快 | 日常轻量 |
+| `whisper-medium` | ~750MB | 快 | 平衡 |
+| `whisper-large-v3-turbo` | ~800MB | 稍慢 | **默认，最准** |
+
+### 常见问题
+
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 只识别英文 | macOS 系统语言是 English | 系统偏好 → 语言与地区 → 简体中文置顶 |
-| PTT 按下无反应 | 未授权麦克风 / 语音识别权限 | 系统设置 → 隐私与安全性 → 语音识别 / 麦克风 |
-| 识别结果乱码 | 语言模型不匹配 | 重启 App 让 Locale 重新加载 |
-
-> **注意**：`SFSpeechRecognizer` 每次只能绑定一个 locale，不支持同时加载多语言模型。中英混合识别依赖 macOS 的「中文（简体）」模型本身的英文兼容能力。
+| 只识别英文 | 未装 mlx-whisper，系统语言是 English | `pip install mlx-whisper` 或切换系统语言为简体中文 |
+| PTT 按下无反应 | 未授权麦克风/语音识别权限 | 系统设置 → 隐私与安全性 → 麦克风 / 语音识别 |
+| 首次 Whisper 很慢 | 正在下载模型（~800MB） | 等待下载完成，后续正常 |
+| 识别结果乱码 | Locale 不匹配 | 安装 mlx-whisper 彻底解决 |
 
 ## Project Structure
 
