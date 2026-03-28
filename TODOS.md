@@ -14,12 +14,27 @@ All P1 tasks completed:
 
 Note: Terminal 前台检测已取消。Accept=Enter 风险低, Auto-Accept 已是 hook 驱动 (只在 Claude Code 请求审批时才发 Enter), 不需要前台检测。
 
+## P0 - 待解决
+
+### Session 管理
+**现状 (2026-03-28 测试):** 多个 Claude Code 实例同时运行时出现以下问题：
+- 文件过期窗口难以调参：窗口太短 → no sessions；太长 → 扫到太多残留文件（测试中出现 6 个）
+- session 列表不稳定：活跃性判断混用 status/activity 文件，时间窗口不一致
+- 切换体验：◀ ▶ 按钮切换后无即时视觉确认 session 是否真的活跃
+
+**待讨论的方向（需市场调研）:**
+- A) 文件清理机制：App 启动时清理 > N 分钟的旧 session 文件
+- B) 旋钮主动绑定：不自动发现，用户按旋钮/按钮手动选择并"锁定"一个 session
+- C) 活跃度评分：综合 status + activity + notify 文件的最新时间戳，只显示真正活跃的
+- D) 参考其他多 session 工具的设计模式（待调研）
+
+**Effort:** M (CC: ~2 hours) | **Depends on:** 市场调研结论
+**Source:** 测试反馈 (2026-03-28)
+
 ## P2 - Before Open Source Release
 
-### 会话级路由
-区分同一 Terminal 中多个 tab/session, 绑定具体 Claude Code 会话。
-通过 hooks 传入的 session_id 或 PID 跟踪实现。
-**Effort:** L (CC: ~3 hours)
+### 会话级路由（已部分实现，见 P0）
+通过 hooks session_id 写 session-specific 文件已实现。剩余：稳定的 session 发现 + 切换 UX。
 **Source:** Codex outside voice (CEO review 2026-03-28)
 
 ### 测试套件
