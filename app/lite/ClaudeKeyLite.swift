@@ -56,6 +56,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var alwaysAcceptCount = 0
     var alwaysAcceptButton: NonActivatingButton!
 
+    // Session routing
+    var sessions: [String] = []   // discovered session ids
+    var sessionIndex = 0          // currently tracked session
+    var sessionLabel: NSTextField!
+
     // Hook fix state
     var pendingHookScript: String?
     var pendingSettingsPath: String?
@@ -222,6 +227,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         modelLabel.frame = NSRect(x: pad, y: y, width: w, height: 14)
         cv.addSubview(modelLabel)
 
+        // ── Session selector (◀ project ▶) ──
+        y -= 4
+        y -= 18
+        let arrowW: CGFloat = 22
+        let prevBtn = makeButton("◀", #selector(prevSession), NSColor(white: 0.22, alpha: 1))
+        prevBtn.frame = NSRect(x: pad, y: y, width: arrowW, height: 18)
+        cv.addSubview(prevBtn)
+
+        let nextBtn = makeButton("▶", #selector(nextSession), NSColor(white: 0.22, alpha: 1))
+        nextBtn.frame = NSRect(x: pad + w - arrowW, y: y, width: arrowW, height: 18)
+        cv.addSubview(nextBtn)
+
+        sessionLabel = makeLabel("—", size: 10, weight: .medium, color: NSColor(white: 0.6, alpha: 1))
+        sessionLabel.frame = NSRect(x: pad + arrowW + 4, y: y, width: w - arrowW * 2 - 8, height: 18)
+        sessionLabel.alignment = .center
+        cv.addSubview(sessionLabel)
+
         // ── Buttons ──
         y -= 8
         let btnDefs: [(String, Selector, NSColor)] = [
@@ -363,7 +385,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderFront(nil)
 
         // Poll every 1s
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateClaudeStatus()
         }
     }
@@ -376,6 +398,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // ── HELPERS ────────────────────────────────────────
+    func makeButton(_ title: String, _ action: Selector, _ bg: NSColor) -> NonActivatingButton {
+        let b = NonActivatingButton()
+        b.title = title
+        b.bezelStyle = .rounded
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.backgroundColor = bg.cgColor
+        b.layer?.cornerRadius = 4
+        b.font = NSFont.systemFont(ofSize: 11)
+        b.contentTintColor = NSColor(white: 0.75, alpha: 1)
+        b.target = self
+        b.action = action
+        b.onPress = { [weak self] in self?.perform(action) }
+        return b
+    }
+
     func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
         let l = NSTextField(labelWithString: text)
         l.font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
@@ -476,8 +514,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func prevSession() { switchSession(by: -1) }
+    @objc func nextSession() { switchSession(by: +1) }
+
+    func switchSession(by delta: Int) {
+        let s = ClaudeStatus.availableSessions()
+        guard !s.isEmpty else { return }
+        sessions = s
+        sessionIndex = ((sessionIndex + delta) % s.count + s.count) % s.count
+        lastActivity = ""  // reset log on switch
+        stripMode = ""
+    }
+
     func updateClaudeStatus() {
-        guard let s = ClaudeStatus.read() else { return }
+        // Refresh session list and clamp index
+        let available = ClaudeStatus.availableSessions()
+        if available != sessions { sessions = available }
+        if sessions.isEmpty { sessionIndex = 0 }
+        else if sessionIndex >= sessions.count { sessionIndex = 0 }
+
+        let sid: String? = sessions.isEmpty ? nil : sessions[sessionIndex]
+        guard let s = ClaudeStatus.read(session: sid) else { return }
+
+        // Session selector label
+        if sessions.isEmpty {
+            sessionLabel.stringValue = "no sessions"
+        } else {
+            let idx = sessionIndex + 1
+            sessionLabel.stringValue = "\(s.project.isEmpty ? sid ?? "?" : s.project)  [\(idx)/\(sessions.count)]"
+        }
 
         // Status strip (synced with LED: breathe/blink/solid)
         applyStripAnimation(color: statusNSColor(for: s), mode: s.ledMode())

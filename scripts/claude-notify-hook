@@ -1,27 +1,26 @@
 #!/bin/bash
 # ClaudeKey notification hook — alerts panel when Claude needs attention
-#
-# Add to ~/.claude/settings.json under "hooks":
-#   { "event": "Notification", "type": "command",
-#     "command": "/path/to/ClaudeKey/scripts/claude-notify-hook" }
 
 read -r json 2>/dev/null || exit 0
 
-TYPE=$(echo "$json" | python3 -c "
-import sys, json
+echo "$json" | python3 -c "
+import sys, json, os, time
 try:
     d = json.load(sys.stdin)
-    print(d.get('notification_type', ''))
+    sid = d.get('session_id', 'unknown')[:8]
+    t   = d.get('notification_type', '')
+    cwd = d.get('cwd', '')
+    project = os.path.basename(cwd) if cwd else ''
+    ts  = int(time.time())
+    if t == 'permission_prompt':
+        payload = {'type':'permission','ts':ts,'session':sid,'project':project}
+    elif t == 'idle_prompt':
+        payload = {'type':'idle','ts':ts,'session':sid,'project':project}
+    else:
+        sys.exit(0)
+    import json as _j
+    with open(f'/tmp/claudekey-{sid}-notify.json', 'w') as f:
+        f.write(_j.dumps(payload))
 except:
-    print('')
-" 2>/dev/null)
-
-# Write notification state for ClaudeKeySoft to read
-case "$TYPE" in
-    permission_prompt)
-        echo '{"type":"permission","ts":'$(date +%s)'}' > /tmp/claudekey-notify.json
-        ;;
-    idle_prompt)
-        echo '{"type":"idle","ts":'$(date +%s)'}' > /tmp/claudekey-notify.json
-        ;;
-esac
+    pass
+" 2>/dev/null

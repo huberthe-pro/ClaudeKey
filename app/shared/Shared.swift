@@ -130,6 +130,7 @@ class ControlPanel: NSPanel {
 
 // ── CLAUDE STATUS ──────────────────────────────────────
 struct ClaudeStatus {
+    var sessionId: String = ""
     var contextPercent: Int = 0
     var contextWindowSize: Int = 0
     var inputTokens: Int = 0
@@ -149,11 +150,39 @@ struct ClaudeStatus {
     var needsAttention: Bool = false
     var isIdle: Bool = false
 
-    static func read() -> ClaudeStatus? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
+    /// Scan /tmp/ for all active Claude Code sessions (those with a status file < 5 min old)
+    static func availableSessions() -> [String] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: "/tmp") else { return [] }
+        let now = Date()
+        return items
+            .filter { $0.hasPrefix("claudekey-") && $0.hasSuffix("-status.json") }
+            .compactMap { name -> (String, Date)? in
+                let path = "/tmp/\(name)"
+                guard let attr = try? fm.attributesOfItem(atPath: path),
+                      let mod = attr[.modificationDate] as? Date,
+                      now.timeIntervalSince(mod) < 300 else { return nil }
+                // extract session id: claudekey-{sid}-status.json
+                let parts = name.dropFirst("claudekey-".count).dropLast("-status.json".count)
+                return (String(parts), mod)
+            }
+            .sorted { $0.1 > $1.1 }  // most recently active first
+            .map { $0.0 }
+    }
+
+    static func read(session: String? = nil) -> ClaudeStatus? {
+        let statusPath: String
+        if let sid = session {
+            statusPath = "/tmp/claudekey-\(sid)-status.json"
+        } else {
+            statusPath = "/tmp/claudekey-status.json"
+        }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: statusPath)),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
 
         var s = ClaudeStatus()
+        // Derive session id from filename or JSON
+        s.sessionId = session ?? (json["session_id"] as? String).map { String($0.prefix(8)) } ?? ""
 
         if let cw = json["context_window"] as? [String: Any] {
             s.contextPercent = cw["used_percentage"] as? Int ?? 0
@@ -188,21 +217,35 @@ struct ClaudeStatus {
         s.version = json["version"] as? String ?? ""
 
         let now = Int(Date().timeIntervalSince1970)
-        if let actData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-activity.json")),
-           let actJson = try? JSONSerialization.jsonObject(with: actData) as? [String: Any] {
-            let ts = actJson["ts"] as? Int ?? 0
-            if now - ts < 10 {
-                s.activity = actJson["activity"] as? String ?? ""
-                s.activityTool = actJson["tool"] as? String ?? ""
+        let sid = s.sessionId
+        // Try session-specific activity file first, fall back to legacy
+        let actPaths = sid.isEmpty
+            ? ["/tmp/claudekey-activity.json"]
+            : ["/tmp/claudekey-\(sid)-activity.json", "/tmp/claudekey-activity.json"]
+        for actPath in actPaths {
+            if let actData = try? Data(contentsOf: URL(fileURLWithPath: actPath)),
+               let actJson = try? JSONSerialization.jsonObject(with: actData) as? [String: Any] {
+                let ts = actJson["ts"] as? Int ?? 0
+                if now - ts < 10 {
+                    s.activity = actJson["activity"] as? String ?? ""
+                    s.activityTool = actJson["tool"] as? String ?? ""
+                }
+                break
             }
         }
-        if let notifData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-notify.json")),
-           let notifJson = try? JSONSerialization.jsonObject(with: notifData) as? [String: Any] {
-            let ts = notifJson["ts"] as? Int ?? 0
-            if now - ts < 30 {
-                let type = notifJson["type"] as? String ?? ""
-                s.needsAttention = (type == "permission")
-                s.isIdle = (type == "idle")
+        let notifyPaths = sid.isEmpty
+            ? ["/tmp/claudekey-notify.json"]
+            : ["/tmp/claudekey-\(sid)-notify.json", "/tmp/claudekey-notify.json"]
+        for notifyPath in notifyPaths {
+            if let notifData = try? Data(contentsOf: URL(fileURLWithPath: notifyPath)),
+               let notifJson = try? JSONSerialization.jsonObject(with: notifData) as? [String: Any] {
+                let ts = notifJson["ts"] as? Int ?? 0
+                if now - ts < 30 {
+                    let type = notifJson["type"] as? String ?? ""
+                    s.needsAttention = (type == "permission")
+                    s.isIdle = (type == "idle")
+                }
+                break
             }
         }
         return s

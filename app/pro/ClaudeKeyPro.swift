@@ -229,6 +229,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var alwaysAcceptCount = 0
     var encoderPos = 0
 
+    // Session routing
+    var sessions: [String] = []
+    var sessionIndex = 0
+    var sessionLabel: NSTextField!
+
     // Hook fix state
     var pendingHookScript: String?
     var pendingSettingsPath: String?
@@ -303,12 +308,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusStrip.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor
         cv.addSubview(statusStrip)
 
-        // ── Section 1: Project label ──
+        // ── Section 1: Project label + session selector ──
         y -= 6
         y -= 16
         headerLabel = label("ClaudeKey Pro", 12, .bold, .white)
-        headerLabel.frame = NSRect(x: pad, y: y, width: w, height: 16)
+        headerLabel.frame = NSRect(x: pad, y: y, width: w * 0.55, height: 16)
         cv.addSubview(headerLabel)
+
+        // Session ◀ ▶ (right side of header row)
+        let arrowW: CGFloat = 20
+        let prevBtn = btn("◀", #selector(prevSession), NSColor(white: 0.22, alpha: 1))
+        prevBtn.frame = NSRect(x: pad + w * 0.55 + 4, y: y, width: arrowW, height: 16)
+        cv.addSubview(prevBtn)
+
+        let nextBtn = btn("▶", #selector(nextSession), NSColor(white: 0.22, alpha: 1))
+        nextBtn.frame = NSRect(x: pad + w - arrowW, y: y, width: arrowW, height: 16)
+        cv.addSubview(nextBtn)
+
+        sessionLabel = label("—", 9, .regular, NSColor(white: 0.5, alpha: 1))
+        sessionLabel.frame = NSRect(x: pad + w * 0.55 + arrowW + 6, y: y,
+                                    width: w * 0.45 - arrowW * 2 - 10, height: 16)
+        sessionLabel.alignment = .center
+        cv.addSubview(sessionLabel)
 
         // ── Section 2: OLED bar ──
         y -= 6
@@ -430,7 +451,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.orderFront(nil)
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateStatus()
         }
     }
@@ -447,6 +468,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .font: NSFont.systemFont(ofSize: size, weight: .semibold)
         ])
         return btn
+    }
+
+    func btn(_ title: String, _ action: Selector, _ bg: NSColor) -> NonActivatingButton {
+        let b = NonActivatingButton()
+        b.title = title; b.bezelStyle = .rounded; b.isBordered = false
+        b.wantsLayer = true; b.layer?.backgroundColor = bg.cgColor; b.layer?.cornerRadius = 4
+        b.font = NSFont.systemFont(ofSize: 10)
+        b.contentTintColor = NSColor(white: 0.75, alpha: 1)
+        b.target = self; b.action = action
+        b.onPress = { [weak self] in self?.perform(action) }
+        return b
     }
 
     func label(_ s: String, _ size: CGFloat, _ w: NSFont.Weight, _ c: NSColor) -> NSTextField {
@@ -519,8 +551,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func prevSession() { switchSession(by: -1) }
+    @objc func nextSession() { switchSession(by: +1) }
+
+    func switchSession(by delta: Int) {
+        let s = ClaudeStatus.availableSessions()
+        guard !s.isEmpty else { return }
+        sessions = s
+        sessionIndex = ((sessionIndex + delta) % s.count + s.count) % s.count
+        lastActivity = ""
+        stripMode = ""
+    }
+
     func updateStatus() {
-        guard let s = ClaudeStatus.read() else { return }
+        let available = ClaudeStatus.availableSessions()
+        if available != sessions { sessions = available }
+        if sessions.isEmpty { sessionIndex = 0 }
+        else if sessionIndex >= sessions.count { sessionIndex = 0 }
+
+        let sid: String? = sessions.isEmpty ? nil : sessions[sessionIndex]
+        guard let s = ClaudeStatus.read(session: sid) else { return }
+
+        if sessions.isEmpty {
+            sessionLabel.stringValue = "no sessions"
+        } else {
+            sessionLabel.stringValue = "\(sessionIndex + 1)/\(sessions.count)"
+        }
 
         // Status strip (synced with LED: breathe/blink/solid)
         applyStripAnimation(color: statusNSColor(for: s), mode: s.ledMode())

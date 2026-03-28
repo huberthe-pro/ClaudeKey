@@ -6,8 +6,10 @@
 
 read -r json 2>/dev/null || exit 0
 
-# Save for ClaudeKeySoft to read
-echo "$json" > /tmp/claudekey-status.json
+# Save for ClaudeKeySoft to read (session-specific + legacy global)
+SID=$(echo "$json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id','unknown')[:8])" 2>/dev/null || echo "unknown")
+echo "$json" > /tmp/claudekey-${SID}-status.json
+echo "$json" > /tmp/claudekey-status.json  # legacy fallback
 
 # Also log for debugging (first 50 lines, then rotate)
 echo "$json" >> /tmp/claudekey-status-log.jsonl

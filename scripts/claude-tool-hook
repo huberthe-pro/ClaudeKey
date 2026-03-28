@@ -1,19 +1,18 @@
 #!/bin/bash
 # ClaudeKey tool activity hook — shows what Claude is doing right now
-#
-# Add to ~/.claude/settings.json under "hooks":
-#   { "event": "PreToolUse", "type": "command",
-#     "command": "/path/to/ClaudeKey/scripts/claude-tool-hook" }
 
 read -r json 2>/dev/null || exit 0
 
 echo "$json" | python3 -c "
-import sys, json
+import sys, json, os, time
 try:
     d = json.load(sys.stdin)
+    sid  = d.get('session_id', 'unknown')[:8]
     tool = d.get('tool_name', '')
-    inp = d.get('tool_input', {})
-    import time; ts = int(time.time())
+    inp  = d.get('tool_input', {})
+    cwd  = d.get('cwd', '')
+    project = os.path.basename(cwd) if cwd else ''
+    ts   = int(time.time())
 
     activity = ''
     if tool == 'Bash':
@@ -46,8 +45,9 @@ try:
         activity = f'{tool}'
 
     if activity:
-        with open('/tmp/claudekey-activity.json', 'w') as f:
-            json.dump({'activity': activity, 'tool': tool, 'ts': ts}, f)
+        with open(f'/tmp/claudekey-{sid}-activity.json', 'w') as f:
+            json.dump({'activity': activity, 'tool': tool, 'ts': ts,
+                       'session': sid, 'project': project}, f)
 except:
     pass
 " 2>/dev/null
