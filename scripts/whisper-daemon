@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""
+ClaudeKey — Whisper STT Daemon
+Persistent: load model once, transcribe on demand.
+
+Protocol (line-oriented via stdio):
+  stdin  → /path/to/audio.wav\n
+  stdout ← transcription text\n  (empty line = silence/error)
+  stderr ← status; prints "READY" when model is warm and ready
+
+Memory: ~800MB while running. Parent kills this process to free memory.
+"""
+import sys
+import os
+import wave
+import struct
+import tempfile
+
+
+def make_silence(sample_rate: int = 16000, duration: float = 0.1) -> str:
+    """Generate a tiny silent WAV to pre-warm the model."""
+    samples = int(sample_rate * duration)
+    path = os.path.join(tempfile.gettempdir(), "claudekey_warmup.wav")
+    with wave.open(path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack(f"<{samples}h", *([0] * samples)))
+    return path
+
+
+def main():
+    model = sys.argv[1] if len(sys.argv) > 1 else \
+        os.environ.get("CLAUDEKEY_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
+
+    lang_env = os.environ.get("CLAUDEKEY_WHISPER_LANG", "zh")
+    language = None if lang_env == "auto" else lang_env
+    initial_prompt = os.environ.get(
+        "CLAUDEKEY_WHISPER_PROMPT", "以下是中英文混合的句子。")
+
+    try:
+        import mlx_whisper
+    except ImportError:
+        print("mlx_whisper not installed", file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    print(f"Loading: {model.split('/')[-1]}", file=sys.stderr, flush=True)
+
+    # Pre-warm: transcribe silence so model weights are loaded into unified memory.
+    # "READY" is only printed after this completes — Swift waits before sending audio.
+    warmup = make_silence()
+    try:
+        mlx_whisper.transcribe(warmup, path_or_hf_repo=model,
+                               language=language, verbose=False)
+    except Exception as e:
+        print(f"Warmup error: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    finally:
+        try:
+            os.unlink(warmup)
+        except OSError:
+            pass
+
+    print("READY", file=sys.stderr, flush=True)
+
+    # Main loop: one audio path per line → one transcription line
+    for line in sys.stdin:
+        audio_file = line.strip()
+        if not audio_file or audio_file == "QUIT":
+            break
+        if not os.path.exists(audio_file):
+            print("", flush=True)
+            continue
+        try:
+            result = mlx_whisper.transcribe(
+                audio_file,
+                path_or_hf_repo=model,
+                language=language,
+                initial_prompt=initial_prompt,
+                verbose=False,
+            )
+            text = result.get("text", "").strip()
+            print(text, flush=True)
+        except Exception as e:
+            print(f"Transcribe error: {e}", file=sys.stderr, flush=True)
+            print("", flush=True)
+
+
+if __name__ == "__main__":
+    main()
