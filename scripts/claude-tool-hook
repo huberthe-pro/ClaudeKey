@@ -7,13 +7,13 @@
 
 read -r json 2>/dev/null || exit 0
 
-python3 -c "
+echo "$json" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     tool = d.get('tool_name', '')
     inp = d.get('tool_input', {})
-    ts = $(date +%s)
+    import time; ts = int(time.time())
 
     activity = ''
     if tool == 'Bash':
