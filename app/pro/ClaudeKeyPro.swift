@@ -204,6 +204,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let speech = SpeechEngine()
 
     // Major UI sections
+    var statusStrip: NSView!  // top color strip synced with LED state
     var oledView: OLEDView!
     var knobView: KnobView!
     var headerLabel: NSTextField!
@@ -291,6 +292,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let w  = panelW - pad * 2
         let ch = cv.frame.height
         var y  = ch   // top-down
+
+        // ── Status strip (synced with LED state) ──
+        let stripH: CGFloat = 4
+        y -= stripH
+        statusStrip = NSView(frame: NSRect(x: 0, y: y, width: panelW, height: stripH))
+        statusStrip.wantsLayer = true
+        statusStrip.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor
+        cv.addSubview(statusStrip)
 
         // ── Section 1: Project label ──
         y -= 6
@@ -465,8 +474,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // ── STATUS UPDATE ──────────────────────────────────
+    func statusNSColor(for s: ClaudeStatus) -> NSColor {
+        switch s.ledColor() {
+        case "red":    return .systemRed
+        case "blue":   return .systemBlue
+        case "yellow": return .systemYellow
+        case "green":  return .systemGreen
+        case "purple": return .systemPurple
+        default:       return NSColor(white: 0.3, alpha: 1)
+        }
+    }
+
     func updateStatus() {
         guard let s = ClaudeStatus.read() else { return }
+
+        // Status strip (synced with LED)
+        statusStrip.layer?.backgroundColor = statusNSColor(for: s).cgColor
 
         headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey Pro" : s.project
 

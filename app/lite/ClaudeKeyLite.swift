@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let speech = SpeechEngine()
 
     // UI elements
+    var statusStrip: NSView!  // top color strip synced with LED state
     var headerLabel: NSTextField!
     var modelLabel: NSTextField!
     var pttButton: NonActivatingButton!
@@ -198,6 +199,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Content view origin is bottom-left, so we compute from top
         let contentH = cv.frame.height
         var y = contentH
+
+        // ── Status strip (synced with LED state) ──
+        let stripH: CGFloat = 4
+        y -= stripH
+        statusStrip = NSView(frame: NSRect(x: 0, y: y, width: panelW, height: stripH))
+        statusStrip.wantsLayer = true
+        statusStrip.layer?.backgroundColor = NSColor(white: 0.3, alpha: 1).cgColor  // white = disconnected
+        cv.addSubview(statusStrip)
 
         // ── Header ──
         y -= 6  // top padding
@@ -418,8 +427,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // ── STATUS UPDATE ──────────────────────────────────
+    func statusNSColor(for s: ClaudeStatus) -> NSColor {
+        switch s.ledColor() {
+        case "red":    return .systemRed
+        case "blue":   return .systemBlue
+        case "yellow": return .systemYellow
+        case "green":  return .systemGreen
+        case "purple": return .systemPurple
+        default:       return NSColor(white: 0.3, alpha: 1)
+        }
+    }
+
     func updateClaudeStatus() {
         guard let s = ClaudeStatus.read() else { return }
+
+        // Status strip (synced with LED)
+        statusStrip.layer?.backgroundColor = statusNSColor(for: s).cgColor
 
         // Header
         headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey" : s.project
