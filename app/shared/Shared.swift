@@ -1,0 +1,340 @@
+/**
+ ClaudeKey — Shared Module
+
+ Common code used by both Lite and Pro macOS apps:
+ - SpeechEngine: Apple SFSpeechRecognizer PTT
+ - Keyboard output: typeString, sendKey
+ - NonActivatingButton / ControlPanel: floating panel controls
+ - ClaudeStatus: reads Claude Code hook JSON from /tmp/
+ - Terminal detection: isTerminalFrontmost()
+ - SerialBridge: connects to ESP32 via USB serial, sends L:/D: commands
+*/
+
+import AppKit
+import CoreGraphics
+import AVFoundation
+import Speech
+import Darwin
+
+// ── SPEECH ENGINE ──────────────────────────────────────
+class SpeechEngine: NSObject, AVAudioRecorderDelegate {
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var recorder: AVAudioRecorder?
+    private var startTime: Date?
+    private(set) var isListening = false
+    var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
+    var onError:  ((String) -> Void)?
+    var onResult: ((String) -> Void)?
+
+    private var tempFileURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("claudekey_ptt.wav")
+    }
+
+    override init() {
+        super.init()
+        speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    }
+
+    func requestPermission(completion: @escaping (Bool) -> Void) {
+        SFSpeechRecognizer.requestAuthorization { status in
+            DispatchQueue.main.async {
+                self.authStatus = status
+                if status != .authorized { self.onError?("Speech permission denied") }
+                completion(status == .authorized)
+            }
+        }
+    }
+
+    var backendDescription: String {
+        "Apple STT (\(Locale.current.identifier))"
+    }
+
+    func startRecording() -> Bool {
+        guard authStatus == .authorized else { onError?("Speech not authorized"); return false }
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+        ]
+        do { recorder = try AVAudioRecorder(url: tempFileURL, settings: settings) }
+        catch { onError?("Mic init failed: \(error.localizedDescription)"); return false }
+        recorder?.delegate = self
+        guard recorder?.record() == true else { onError?("Mic failed to start"); return false }
+        isListening = true; startTime = Date(); return true
+    }
+
+    func stopRecording() {
+        guard isListening else { return }
+        let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
+        recorder?.stop(); recorder = nil; isListening = false
+        guard duration > 0.3 else { onError?("Recording too short"); return }
+        transcribe(fileURL: tempFileURL)
+    }
+
+    private func transcribe(fileURL: URL) {
+        guard let recognizer = speechRecognizer, recognizer.isAvailable else {
+            onError?("Speech recognizer unavailable"); return
+        }
+        let req = SFSpeechURLRecognitionRequest(url: fileURL)
+        recognizer.recognitionTask(with: req) { [weak self] result, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    self?.onError?("Recognition failed: \(error.localizedDescription)"); return
+                }
+                guard let result = result, result.isFinal else { return }
+                self?.onResult?(result.bestTranscription.formattedString)
+            }
+        }
+    }
+}
+
+// ── KEYBOARD OUTPUT ────────────────────────────────────
+func typeString(_ text: String) {
+    for char in text {
+        var chars = Array(String(char).utf16)
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
+        down.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+        down.post(tap: .cgAnnotatedSessionEventTap)
+        up.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
+        up.post(tap: .cgAnnotatedSessionEventTap)
+        usleep(5000)
+    }
+}
+
+func sendKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
+    guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
+          let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else { return }
+    down.flags = flags
+    up.flags = flags
+    down.post(tap: .cgAnnotatedSessionEventTap)
+    usleep(10000)
+    up.post(tap: .cgAnnotatedSessionEventTap)
+}
+
+// ── TERMINAL DETECTION ─────────────────────────────────
+/// Check if the frontmost app is a terminal (Terminal.app or iTerm2).
+/// Used to prevent Accept/Reject from firing into non-terminal apps.
+private let terminalBundleIDs: Set<String> = [
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "io.alacritty",
+    "com.github.wez.wezterm",
+    "com.mitchellh.ghostty",
+]
+
+func isTerminalFrontmost() -> Bool {
+    guard let app = NSWorkspace.shared.frontmostApplication,
+          let bundleID = app.bundleIdentifier else { return false }
+    return terminalBundleIDs.contains(bundleID)
+}
+
+// ── NON-ACTIVATING CONTROLS ────────────────────────────
+class NonActivatingButton: NSButton {
+    override var acceptsFirstResponder: Bool { false }
+    var onPress: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { isHighlighted = true; onPress?() }
+    override func mouseUp(with event: NSEvent) { isHighlighted = false }
+}
+
+class ControlPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+// ── CLAUDE STATUS ──────────────────────────────────────
+struct ClaudeStatus {
+    var contextPercent: Int = 0
+    var contextWindowSize: Int = 0
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
+    var cacheReadTokens: Int = 0
+    var model: String = ""
+    var version: String = ""
+    var costUSD: Double = 0
+    var totalDurationMs: Int = 0
+    var linesAdded: Int = 0
+    var linesRemoved: Int = 0
+    var rate5h: Int = 0
+    var rate7d: Int = 0
+    var project: String = ""
+    var activity: String = ""
+    var activityTool: String = ""
+    var needsAttention: Bool = false
+    var isIdle: Bool = false
+
+    static func read() -> ClaudeStatus? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        var s = ClaudeStatus()
+
+        if let cw = json["context_window"] as? [String: Any] {
+            s.contextPercent = cw["used_percentage"] as? Int ?? 0
+            s.contextWindowSize = cw["context_window_size"] as? Int ?? 0
+            if let cu = cw["current_usage"] as? [String: Any] {
+                s.inputTokens = cu["input_tokens"] as? Int ?? 0
+                s.outputTokens = cu["output_tokens"] as? Int ?? 0
+                s.cacheReadTokens = cu["cache_read_input_tokens"] as? Int ?? 0
+            }
+        }
+        if let m = json["model"] as? [String: Any] {
+            s.model = m["display_name"] as? String ?? ""
+        }
+        if let c = json["cost"] as? [String: Any] {
+            s.costUSD = c["total_cost_usd"] as? Double ?? 0
+            s.totalDurationMs = c["total_duration_ms"] as? Int ?? 0
+            s.linesAdded = c["total_lines_added"] as? Int ?? 0
+            s.linesRemoved = c["total_lines_removed"] as? Int ?? 0
+        }
+        if let rl = json["rate_limits"] as? [String: Any] {
+            if let h5 = rl["five_hour"] as? [String: Any] {
+                s.rate5h = Int(h5["used_percentage"] as? Double ?? 0)
+            }
+            if let d7 = rl["seven_day"] as? [String: Any] {
+                s.rate7d = Int(d7["used_percentage"] as? Double ?? 0)
+            }
+        }
+        if let ws = json["workspace"] as? [String: Any] {
+            let dir = ws["current_dir"] as? String ?? ""
+            s.project = (dir as NSString).lastPathComponent
+        }
+        s.version = json["version"] as? String ?? ""
+
+        let now = Int(Date().timeIntervalSince1970)
+        if let actData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-activity.json")),
+           let actJson = try? JSONSerialization.jsonObject(with: actData) as? [String: Any] {
+            let ts = actJson["ts"] as? Int ?? 0
+            if now - ts < 10 {
+                s.activity = actJson["activity"] as? String ?? ""
+                s.activityTool = actJson["tool"] as? String ?? ""
+            }
+        }
+        if let notifData = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-notify.json")),
+           let notifJson = try? JSONSerialization.jsonObject(with: notifData) as? [String: Any] {
+            let ts = notifJson["ts"] as? Int ?? 0
+            if now - ts < 30 {
+                let type = notifJson["type"] as? String ?? ""
+                s.needsAttention = (type == "permission")
+                s.isIdle = (type == "idle")
+            }
+        }
+        return s
+    }
+
+    /// Convert status to LED color name for Serial protocol
+    func ledColor() -> String {
+        if needsAttention { return "red" }
+        if isIdle { return "green" }
+        if contextPercent < 25 { return "green" }
+        if contextPercent < 50 { return "blue" }
+        if contextPercent < 75 { return "yellow" }
+        if contextPercent < 90 { return "red" }
+        return "red"  // >90%
+    }
+
+    /// Convert status to LED mode for Serial protocol
+    func ledMode() -> String {
+        if needsAttention { return "k" }  // blink for approval needed
+        if contextPercent > 90 { return "k" }  // blink for critical
+        if contextPercent > 75 { return "s" }  // solid for warning
+        return "b"  // breathe for normal
+    }
+
+    /// Format as D: command for OLED (Pro)
+    func oledCommand() -> String {
+        let cost = String(format: "$%.2f", costUSD)
+        let dur = totalDurationMs / 1000
+        let status = needsAttention ? "APPROVE" : (isIdle ? "Idle" : "Working")
+        let act = String(activity.prefix(40))
+        return "D:\(contextPercent),\(rate5h),\(rate7d),\(cost),\(dur),\(status),\(act)"
+    }
+}
+
+// ── SERIAL BRIDGE ──────────────────────────────────────
+/// Manages USB serial connection to ESP32-S3 ClaudeKey hardware.
+/// Discovers the device at /dev/cu.usbmodem*, opens the port,
+/// and sends L:/D: commands based on ClaudeStatus.
+class SerialBridge {
+    private var fd: Int32 = -1
+    private var devicePath: String?
+    var onLog: ((String) -> Void)?
+
+    /// Scan for ESP32-S3 USB serial device
+    func discover() -> String? {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: "/dev") else { return nil }
+        // ESP32-S3 with TinyUSB typically shows as cu.usbmodemXXXX
+        let candidates = items.filter { $0.hasPrefix("cu.usbmodem") }
+            .sorted()  // deterministic order
+        return candidates.first.map { "/dev/\($0)" }
+    }
+
+    /// Open the serial port at 115200 baud
+    func connect() -> Bool {
+        guard let path = discover() else {
+            onLog?("Serial: no ESP32 found at /dev/cu.usbmodem*")
+            return false
+        }
+        devicePath = path
+
+        fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
+        guard fd >= 0 else {
+            onLog?("Serial: failed to open \(path)")
+            return false
+        }
+
+        // Configure 115200 8N1
+        var options = termios()
+        tcgetattr(fd, &options)
+        cfsetispeed(&options, speed_t(B115200))
+        cfsetospeed(&options, speed_t(B115200))
+        options.c_cflag |= UInt(CS8 | CLOCAL | CREAD)
+        options.c_cflag &= ~UInt(PARENB | CSTOPB)
+        options.c_iflag = 0
+        options.c_oflag = 0
+        options.c_lflag = 0
+        tcsetattr(fd, TCSANOW, &options)
+
+        // Clear O_NONBLOCK after setup
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+
+        onLog?("Serial: connected to \(path)")
+        return true
+    }
+
+    /// Send a raw command string (with newline)
+    func send(_ command: String) {
+        guard fd >= 0 else { return }
+        let line = command + "\n"
+        line.withCString { ptr in
+            _ = write(fd, ptr, strlen(ptr))
+        }
+    }
+
+    /// Send LED + OLED commands from ClaudeStatus
+    func sendStatus(_ status: ClaudeStatus, isPro: Bool = false) {
+        send("L:\(status.ledColor()),\(status.ledMode())")
+        if isPro {
+            send(status.oledCommand())
+        }
+    }
+
+    /// Close the serial port
+    func disconnect() {
+        if fd >= 0 {
+            close(fd)
+            fd = -1
+            onLog?("Serial: disconnected")
+        }
+    }
+
+    var isConnected: Bool { fd >= 0 }
+
+    deinit { disconnect() }
+}

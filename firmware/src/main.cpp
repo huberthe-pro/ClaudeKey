@@ -4,11 +4,27 @@
  * USB Composite Device: HID Keyboard + UAC Microphone
  * 6 mechanical keys + I2S MEMS mic (INMP441) + WS2812B LED strip + buzzer
  *
- * Wiring:
+ * Serial Protocol (host → device):
+ *   L:<color>[,<mode>]  LED strip color + optional mode
+ *     colors: green, blue, yellow, red, white, purple, off
+ *     modes:  b=breathe, s=solid, k=blink (default: unchanged)
+ *   D:<csv>             OLED display data (Pro only, see display.h)
+ *   A:<alert>           Buzzer alert: accept, reject, alert, ptt_start, ptt_stop
+ *
+ * Serial Protocol (device → host):
+ *   K:<key>             Key press event: accept, reject, up, down, ptt, spare
+ *   E:<event>           Encoder event (Pro only): cw, ccw, press
+ *
+ * Wiring (Lite):
  *   Keys: GPIO4-7,15,16 → switch → GND (internal pull-up)
  *   INMP441: WS→GPIO42, SCK→GPIO41, SD→GPIO40, L/R→GND, VDD→3.3V
  *   LED strip: DIN→GPIO48, VCC→3.3V, GND→GND
  *   Buzzer: GPIO17 → passive buzzer → GND
+ *
+ * Wiring (Pro adds):
+ *   OLED SSD1309: SDA→GPIO1, SCL→GPIO2, VCC→3.3V, GND→GND
+ *   Encoder EC11: CLK→GPIO38, DT→GPIO39, SW→GPIO3, GND→GND
+ *   Extra keys: GPIO8(Undo), GPIO9(Interrupt), GPIO18(Tab), GPIO21(Paste)
  */
 
 #include <Arduino.h>
@@ -17,6 +33,11 @@
 #include <driver/i2s.h>
 #include <math.h>
 
+#ifdef CLAUDEKEY_PRO
+#include "pro/display.h"
+#include "pro/encoder.h"
+#endif
+
 // ── PIN CONFIG ─────────────────────────────────────────
 static const uint8_t KEY_PINS[]  = {4, 5, 6, 7, 15, 16};
 static const uint8_t NUM_KEYS    = 6;
@@ -24,26 +45,27 @@ static const uint8_t LED_PIN     = 48;
 static const uint8_t NUM_PIXELS  = 8;
 
 // I2S mic (INMP441)
-static const uint8_t I2S_WS  = 42;  // Word Select (LRCK)
-static const uint8_t I2S_SCK = 41;  // Serial Clock (BCLK)
-static const uint8_t I2S_SD  = 40;  // Serial Data (DOUT)
+static const uint8_t I2S_WS  = 42;
+static const uint8_t I2S_SCK = 41;
+static const uint8_t I2S_SD  = 40;
 
 // Passive buzzer
 static const uint8_t BUZZER_PIN = 17;
-static const uint8_t BUZZER_CHANNEL = 0;
+
+#ifdef CLAUDEKEY_PRO
+// Pro extra keys
+static const uint8_t PRO_KEY_PINS[] = {8, 9, 18, 21};
+static const uint8_t NUM_PRO_KEYS   = 4;
+enum ProKeyAction { UNDO = 0, INTERRUPT, TAB, PASTE };
+struct KeyState proKeyState[4];
+#endif
 
 // ── USB DESCRIPTORS ────────────────────────────────────
 Adafruit_USBD_HID usbHID;
-
-// HID Report Descriptor: standard keyboard
 uint8_t const hid_report_desc[] = {TUD_HID_REPORT_DESC_KEYBOARD()};
 
-// USB Audio: 16kHz mono 16-bit (good for speech recognition)
+// USB Audio: 16kHz mono 16-bit
 static const uint32_t SAMPLE_RATE = 16000;
-static const uint8_t  CHANNELS    = 1;
-static const uint8_t  BIT_DEPTH   = 16;
-
-// Audio buffer
 static const size_t AUDIO_BUF_SAMPLES = 256;
 int16_t audio_buf[AUDIO_BUF_SAMPLES];
 
@@ -51,45 +73,97 @@ int16_t audio_buf[AUDIO_BUF_SAMPLES];
 Adafruit_NeoPixel pixels(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 struct LedState {
-    uint8_t r = 0, g = 30, b = 0;  // green default
-    char mode = 'b';                 // b=breathe, s=solid, k=blink
+    uint8_t r = 30, g = 30, b = 30;  // white default = "disconnected"
+    char mode = 'b';                   // b=breathe (slow white = waiting for host)
     float phase = 0;
+    bool hostConnected = false;        // true after first L: command received
 } led;
 
 // ── KEY STATE ──────────────────────────────────────────
 struct KeyState {
     bool pressed = false;
     uint32_t lastChange = 0;
-} keyState[NUM_KEYS];
+} keyState[6];
 
 static const uint32_t DEBOUNCE_MS = 50;
 bool pttHeld = false;
 
-// Key actions: HID keycodes
-// Accept='y'+Enter, Reject=Esc, Up, Down, PTT=F13, Spare=none
 enum KeyAction { ACCEPT, REJECT, UP, DOWN, PTT, SPARE };
 
-// ── SERIAL PROTOCOL (LED control) ──────────────────────
+// ── NON-BLOCKING BUZZER ────────────────────────────────
+// Plays tone sequences without blocking the main loop.
+// Each sequence is an array of {freq, duration_ms} pairs, terminated by {0,0}.
+struct BuzzerNote { uint16_t freq; uint16_t ms; };
+
+static const BuzzerNote SEQ_ACCEPT[]   = {{1200,40}, {0,0}};
+static const BuzzerNote SEQ_REJECT[]   = {{400,60}, {0,40}, {300,80}, {0,0}};
+static const BuzzerNote SEQ_PTT_START[]= {{600,30}, {900,30}, {1200,30}, {0,0}};
+static const BuzzerNote SEQ_PTT_STOP[] = {{1200,30}, {900,30}, {600,30}, {0,0}};
+static const BuzzerNote SEQ_ALERT[]    = {{2000,80}, {0,60}, {2000,80}, {0,60}, {2000,80}, {0,0}};
+static const BuzzerNote SEQ_CLICK[]    = {{800,20}, {0,0}};
+static const BuzzerNote SEQ_CLICK_LO[] = {{600,20}, {0,0}};
+static const BuzzerNote SEQ_SPARE[]    = {{440,30}, {0,0}};
+
+struct BuzzerState {
+    const BuzzerNote* seq = nullptr;
+    uint8_t idx = 0;
+    uint32_t noteStart = 0;
+    bool playing = false;
+} buzzer;
+
+void buzzerPlay(const BuzzerNote* sequence) {
+    buzzer.seq = sequence;
+    buzzer.idx = 0;
+    buzzer.noteStart = millis();
+    buzzer.playing = true;
+    // Start first note immediately
+    if (sequence[0].freq > 0) {
+        ledcWriteTone(BUZZER_PIN, sequence[0].freq);
+    } else {
+        ledcWriteTone(BUZZER_PIN, 0);  // silence gap
+    }
+}
+
+void buzzerUpdate() {
+    if (!buzzer.playing) return;
+    uint32_t now = millis();
+    const BuzzerNote& note = buzzer.seq[buzzer.idx];
+    if (now - buzzer.noteStart >= note.ms) {
+        buzzer.idx++;
+        if (buzzer.seq[buzzer.idx].freq == 0 && buzzer.seq[buzzer.idx].ms == 0) {
+            // End of sequence
+            ledcWriteTone(BUZZER_PIN, 0);
+            buzzer.playing = false;
+            return;
+        }
+        buzzer.noteStart = now;
+        if (buzzer.seq[buzzer.idx].freq > 0) {
+            ledcWriteTone(BUZZER_PIN, buzzer.seq[buzzer.idx].freq);
+        } else {
+            ledcWriteTone(BUZZER_PIN, 0);  // silence gap
+        }
+    }
+}
+
+// ── SERIAL PROTOCOL ────────────────────────────────────
 String serialBuf;
 
 // ── FORWARD DECLARATIONS ───────────────────────────────
 void setupI2S();
 void setupKeys();
-void setupBuzzer();
 void scanKeys();
 void onKeyPress(uint8_t idx);
 void onKeyRelease(uint8_t idx);
-void sendKey(uint8_t keycode);
-void sendString(const char* str);
+void hidSendKey(uint8_t keycode);
+void hidSendString(const char* str);
 void checkSerial();
 void updateLeds();
 void readMicAndSendUSB();
-void beep(uint16_t freq, uint16_t durationMs);
-void beepAccept();
-void beepReject();
-void beepPttStart();
-void beepPttStop();
-void beepAlert();
+#ifdef CLAUDEKEY_PRO
+void setupProKeys();
+void scanProKeys();
+void onProKeyPress(uint8_t idx);
+#endif
 
 // ── SETUP ──────────────────────────────────────────────
 void setup() {
@@ -98,17 +172,21 @@ void setup() {
     // USB HID
     usbHID.setReportDescriptor(hid_report_desc, sizeof(hid_report_desc));
     usbHID.begin();
-
-    // Wait for USB mount
     while (!TinyUSBDevice.mounted()) { delay(1); }
 
     setupI2S();
     setupKeys();
-    setupBuzzer();
+    ledcAttach(BUZZER_PIN, 1000, 8);  // buzzer PWM
 
     pixels.begin();
     pixels.setBrightness(80);
     pixels.show();
+
+#ifdef CLAUDEKEY_PRO
+    displayInit();
+    encoderInit();
+    setupProKeys();
+#endif
 
     Serial.println("ClaudeKey ready");
 }
@@ -128,31 +206,28 @@ void setupI2S() {
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0,
     };
-
     i2s_pin_config_t pin_config = {
         .bck_io_num = I2S_SCK,
         .ws_io_num = I2S_WS,
         .data_out_num = I2S_PIN_NO_CHANGE,
         .data_in_num = I2S_SD,
     };
-
     i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_NUM_0, &pin_config);
     i2s_zero_dma_buffer(I2S_NUM_0);
 }
 
-// ── KEY SETUP ──────────────────────────────────────────
+// ── KEY SETUP & SCANNING ───────────────────────────────
 void setupKeys() {
     for (uint8_t i = 0; i < NUM_KEYS; i++) {
         pinMode(KEY_PINS[i], INPUT_PULLUP);
     }
 }
 
-// ── KEY SCANNING ───────────────────────────────────────
 void scanKeys() {
     uint32_t now = millis();
     for (uint8_t i = 0; i < NUM_KEYS; i++) {
-        bool isPressed = !digitalRead(KEY_PINS[i]);  // active LOW
+        bool isPressed = !digitalRead(KEY_PINS[i]);
         if (isPressed != keyState[i].pressed) {
             if (now - keyState[i].lastChange >= DEBOUNCE_MS) {
                 keyState[i].lastChange = now;
@@ -167,20 +242,24 @@ void scanKeys() {
 void onKeyPress(uint8_t idx) {
     switch (idx) {
         case ACCEPT:
-            sendKey(HID_KEY_ENTER);  // Enter only — Claude Code defaults to accept
-            beepAccept();
+            hidSendKey(HID_KEY_ENTER);
+            buzzerPlay(SEQ_ACCEPT);
+            Serial.println("K:accept");
             break;
         case REJECT:
-            sendKey(HID_KEY_ESCAPE);
-            beepReject();
+            hidSendKey(HID_KEY_ESCAPE);
+            buzzerPlay(SEQ_REJECT);
+            Serial.println("K:reject");
             break;
         case UP:
-            sendKey(HID_KEY_ARROW_UP);
-            beep(800, 20);
+            hidSendKey(HID_KEY_ARROW_UP);
+            buzzerPlay(SEQ_CLICK);
+            Serial.println("K:up");
             break;
         case DOWN:
-            sendKey(HID_KEY_ARROW_DOWN);
-            beep(600, 20);
+            hidSendKey(HID_KEY_ARROW_DOWN);
+            buzzerPlay(SEQ_CLICK_LO);
+            Serial.println("K:down");
             break;
         case PTT:
             if (!pttHeld) {
@@ -188,11 +267,13 @@ void onKeyPress(uint8_t idx) {
                 uint8_t report[8] = {0};
                 report[2] = HID_KEY_F13;
                 usbHID.keyboardReport(0, 0, report+2);
-                beepPttStart();
+                buzzerPlay(SEQ_PTT_START);
+                Serial.println("K:ptt");
             }
             break;
         case SPARE:
-            beep(440, 30);
+            buzzerPlay(SEQ_SPARE);
+            Serial.println("K:spare");
             break;
     }
 }
@@ -201,27 +282,25 @@ void onKeyRelease(uint8_t idx) {
     if (idx == PTT && pttHeld) {
         pttHeld = false;
         usbHID.keyboardRelease(0);
-        beepPttStop();
+        buzzerPlay(SEQ_PTT_STOP);
     }
 }
 
-void sendKey(uint8_t keycode) {
+void hidSendKey(uint8_t keycode) {
     uint8_t keycodes[6] = {keycode, 0, 0, 0, 0, 0};
     usbHID.keyboardReport(0, 0, keycodes);
     delay(10);
     usbHID.keyboardRelease(0);
 }
 
-void sendString(const char* str) {
+void hidSendString(const char* str) {
     while (*str) {
         uint8_t keycode = 0;
         uint8_t modifier = 0;
         char c = *str++;
-        if (c == '\n') {
-            keycode = HID_KEY_ENTER;
-        } else if (c >= 'a' && c <= 'z') {
-            keycode = HID_KEY_A + (c - 'a');
-        } else if (c >= 'A' && c <= 'Z') {
+        if (c == '\n') keycode = HID_KEY_ENTER;
+        else if (c >= 'a' && c <= 'z') keycode = HID_KEY_A + (c - 'a');
+        else if (c >= 'A' && c <= 'Z') {
             keycode = HID_KEY_A + (c - 'A');
             modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
         }
@@ -235,60 +314,59 @@ void sendString(const char* str) {
     }
 }
 
-// ── BUZZER ─────────────────────────────────────────────
-void setupBuzzer() {
-    ledcAttach(BUZZER_PIN, 1000, 8);
-}
-
-void beep(uint16_t freq, uint16_t durationMs) {
-    ledcWriteTone(BUZZER_PIN, freq);
-    delay(durationMs);
-    ledcWriteTone(BUZZER_PIN, 0);
-}
-
-void beepAccept() {
-    // Short cheerful beep
-    beep(1200, 40);
-}
-
-void beepReject() {
-    // Two low beeps
-    beep(400, 60);
-    delay(40);
-    beep(300, 80);
-}
-
-void beepPttStart() {
-    // Rising tone
-    beep(600, 30);
-    beep(900, 30);
-    beep(1200, 30);
-}
-
-void beepPttStop() {
-    // Falling tone
-    beep(1200, 30);
-    beep(900, 30);
-    beep(600, 30);
-}
-
-void beepAlert() {
-    // Alarm: three fast high beeps
-    for (int i = 0; i < 3; i++) {
-        beep(2000, 80);
-        delay(60);
+// ── PRO EXTRA KEYS ─────────────────────────────────────
+#ifdef CLAUDEKEY_PRO
+void setupProKeys() {
+    for (uint8_t i = 0; i < NUM_PRO_KEYS; i++) {
+        pinMode(PRO_KEY_PINS[i], INPUT_PULLUP);
     }
 }
+
+void scanProKeys() {
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < NUM_PRO_KEYS; i++) {
+        bool isPressed = !digitalRead(PRO_KEY_PINS[i]);
+        if (isPressed != proKeyState[i].pressed) {
+            if (now - proKeyState[i].lastChange >= DEBOUNCE_MS) {
+                proKeyState[i].lastChange = now;
+                proKeyState[i].pressed = isPressed;
+                if (isPressed) onProKeyPress(i);
+            }
+        }
+    }
+}
+
+void onProKeyPress(uint8_t idx) {
+    switch (idx) {
+        case UNDO:
+            hidSendKey(HID_KEY_Z);  // TODO: need modifier Cmd+Z
+            buzzerPlay(SEQ_CLICK);
+            Serial.println("K:undo");
+            break;
+        case INTERRUPT:
+            hidSendKey(HID_KEY_C);  // TODO: need modifier Ctrl+C
+            buzzerPlay(SEQ_CLICK);
+            Serial.println("K:interrupt");
+            break;
+        case TAB:
+            hidSendKey(HID_KEY_TAB);
+            buzzerPlay(SEQ_CLICK);
+            Serial.println("K:tab");
+            break;
+        case PASTE:
+            hidSendKey(HID_KEY_V);  // TODO: need modifier Cmd+V
+            buzzerPlay(SEQ_CLICK);
+            Serial.println("K:paste");
+            break;
+    }
+}
+#endif
 
 // ── MIC → USB AUDIO ───────────────────────────────────
 void readMicAndSendUSB() {
     size_t bytesRead = 0;
     i2s_read(I2S_NUM_0, audio_buf, sizeof(audio_buf), &bytesRead, 0);
-
     if (bytesRead > 0 && pttHeld) {
-        // When PTT is held, stream audio over USB CDC serial
-        // macOS app can capture this and feed to STT
-        // Format: raw 16-bit PCM, 16kHz mono
         Serial.write((uint8_t*)audio_buf, bytesRead);
     }
 }
@@ -299,8 +377,12 @@ void checkSerial() {
         char c = Serial.read();
         if (c == '\n') {
             serialBuf.trim();
-            if (serialBuf.startsWith("S:")) {
-                String color = serialBuf.substring(2);
+            if (serialBuf.startsWith("L:")) {
+                // LED color[,mode]  e.g. "L:green" or "L:red,k"
+                led.hostConnected = true;
+                String payload = serialBuf.substring(2);
+                int comma = payload.indexOf(',');
+                String color = (comma >= 0) ? payload.substring(0, comma) : payload;
                 color.toLowerCase();
                 if      (color == "green")  { led.r=0;  led.g=30; led.b=0;  }
                 else if (color == "blue")   { led.r=0;  led.g=0;  led.b=40; }
@@ -309,17 +391,24 @@ void checkSerial() {
                 else if (color == "white")  { led.r=30; led.g=30; led.b=30; }
                 else if (color == "purple") { led.r=20; led.g=0;  led.b=30; }
                 else if (color == "off")    { led.r=0;  led.g=0;  led.b=0;  }
-            } else if (serialBuf.startsWith("M:")) {
-                char m = serialBuf.charAt(2);
-                if (m == 'b' || m == 's' || m == 'k') led.mode = m;
+                // Optional mode after comma
+                if (comma >= 0) {
+                    char m = payload.charAt(comma + 1);
+                    if (m == 'b' || m == 's' || m == 'k') led.mode = m;
+                }
+#ifdef CLAUDEKEY_PRO
+            } else if (serialBuf.startsWith("D:")) {
+                led.hostConnected = true;
+                displayParseCommand(serialBuf.c_str());
+#endif
             } else if (serialBuf.startsWith("A:")) {
-                // Audio alerts from macOS hooks
+                led.hostConnected = true;
                 String alert = serialBuf.substring(2);
-                if (alert == "accept") beepAccept();
-                else if (alert == "reject") beepReject();
-                else if (alert == "alert") beepAlert();
-                else if (alert == "ptt_start") beepPttStart();
-                else if (alert == "ptt_stop") beepPttStop();
+                if      (alert == "accept")    buzzerPlay(SEQ_ACCEPT);
+                else if (alert == "reject")    buzzerPlay(SEQ_REJECT);
+                else if (alert == "alert")     buzzerPlay(SEQ_ALERT);
+                else if (alert == "ptt_start") buzzerPlay(SEQ_PTT_START);
+                else if (alert == "ptt_stop")  buzzerPlay(SEQ_PTT_STOP);
             }
             serialBuf = "";
         } else {
@@ -336,6 +425,10 @@ void updateLeds() {
     switch (led.mode) {
         case 'b':  // breathe
             factor = (sin(led.phase) + 1.0) / 2.0;
+            // Slower breathe when disconnected (white), normal when connected
+            if (!led.hostConnected) {
+                factor = (sin(led.phase * 0.3) + 1.0) / 2.0;  // ~3x slower
+            }
             factor = 0.15 + factor * 0.85;
             break;
         case 'k':  // blink
@@ -368,8 +461,18 @@ void updateLeds() {
 // ── MAIN LOOP ─────────────────────────────────────────
 void loop() {
     scanKeys();
+#ifdef CLAUDEKEY_PRO
+    scanProKeys();
+    // Encoder: CW=down, CCW=up, press=enter
+    int enc = encoderRead();
+    if (enc > 0) { hidSendKey(HID_KEY_ARROW_DOWN); Serial.println("E:cw"); }
+    if (enc < 0) { hidSendKey(HID_KEY_ARROW_UP);   Serial.println("E:ccw"); }
+    if (encoderButtonPressed()) { hidSendKey(HID_KEY_ENTER); Serial.println("E:press"); }
+    displayUpdate();
+#endif
     checkSerial();
     readMicAndSendUSB();
+    buzzerUpdate();
     updateLeds();
-    delay(1);  // 1ms tick
+    delay(1);
 }

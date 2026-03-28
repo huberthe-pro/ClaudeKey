@@ -21,109 +21,6 @@ import CoreGraphics
 import AVFoundation
 import Speech
 
-// ── SPEECH ENGINE ──────────────────────────────────────
-class SpeechEngine: NSObject, AVAudioRecorderDelegate {
-    private var speechRecognizer: SFSpeechRecognizer?
-    private var recorder: AVAudioRecorder?
-    private var startTime: Date?
-    private let tempFileURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("claudekey-pro-stt.wav")
-
-    var isListening = false
-    var onResult: ((String) -> Void)?
-    var onError:  ((String) -> Void)?
-
-    override init() {
-        super.init()
-        speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
-            ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
-            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    }
-
-    var backendDescription: String {
-        "Apple STT (\(Locale.current.identifier))"
-    }
-
-    func requestPermission(completion: @escaping (Bool) -> Void) {
-        SFSpeechRecognizer.requestAuthorization { status in
-            DispatchQueue.main.async { completion(status == .authorized) }
-        }
-    }
-
-    func startRecording() -> Bool {
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: 16000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-        ]
-        do { recorder = try AVAudioRecorder(url: tempFileURL, settings: settings) }
-        catch { onError?("Mic init failed"); return false }
-        recorder?.delegate = self
-        guard recorder?.record() == true else { onError?("Mic failed"); return false }
-        isListening = true; startTime = Date(); return true
-    }
-
-    func stopRecording() {
-        guard isListening else { return }
-        let duration = startTime.map { Date().timeIntervalSince($0) } ?? 0
-        recorder?.stop(); recorder = nil; isListening = false
-        guard duration > 0.3 else { onError?("Too short"); return }
-        transcribe(fileURL: tempFileURL)
-    }
-
-    private func transcribe(fileURL: URL) {
-        guard let r = speechRecognizer, r.isAvailable else {
-            onError?("Recognizer unavailable"); return
-        }
-        let req = SFSpeechURLRecognitionRequest(url: fileURL)
-        r.recognitionTask(with: req) { [weak self] result, error in
-            DispatchQueue.main.async {
-                if let e = error { self?.onError?("STT: \(e.localizedDescription)"); return }
-                guard let result = result, result.isFinal else { return }
-                self?.onResult?(result.bestTranscription.formattedString)
-            }
-        }
-    }
-}
-
-// ── HID OUTPUT ─────────────────────────────────────────
-func typeString(_ text: String) {
-    for char in text {
-        var chars = Array(String(char).utf16)
-        guard let dn = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
-        dn.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
-        dn.post(tap: .cgAnnotatedSessionEventTap)
-        up.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
-        up.post(tap: .cgAnnotatedSessionEventTap)
-        usleep(5000)
-    }
-}
-
-func sendKey(_ code: CGKeyCode, flags: CGEventFlags = []) {
-    guard let dn = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
-          let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else { return }
-    dn.flags = flags; up.flags = flags
-    dn.post(tap: .cgAnnotatedSessionEventTap)
-    usleep(10000)
-    up.post(tap: .cgAnnotatedSessionEventTap)
-}
-
-// ── NON-ACTIVATING CONTROLS ────────────────────────────
-class NonActivatingButton: NSButton {
-    override var acceptsFirstResponder: Bool { false }
-    var onPress: (() -> Void)?
-    override func mouseDown(with e: NSEvent) { isHighlighted = true;  onPress?() }
-    override func mouseUp(with e: NSEvent)   { isHighlighted = false }
-}
-
-class ControlPanel: NSPanel {
-    override var canBecomeKey:  Bool { false }
-    override var canBecomeMain: Bool { false }
-}
-
 // ── OLED DISPLAY VIEW ──────────────────────────────────
 // Simulates SSD1309 2.42" 128x64 monochrome OLED (green phosphor)
 class OLEDView: NSView {
@@ -298,76 +195,6 @@ class KnobView: NSView {
     func turnRight() { angle += .pi / 10; needsDisplay = true; onTurnRight?() }
 
     override var acceptsFirstResponder: Bool { true }
-}
-
-// ── CLAUDE STATUS ──────────────────────────────────────
-struct ClaudeStatus {
-    var contextPercent: Int = 0
-    var contextWindowSize: Int = 0
-    var inputTokens: Int = 0
-    var outputTokens: Int = 0
-    var cacheReadTokens: Int = 0
-    var model: String = ""
-    var version: String = ""
-    var costUSD: Double = 0
-    var totalDurationMs: Int = 0
-    var linesAdded: Int = 0
-    var linesRemoved: Int = 0
-    var rate5h: Int = 0
-    var rate7d: Int = 0
-    var project: String = ""
-    var activity: String = ""
-    var activityTool: String = ""
-    var needsAttention: Bool = false
-    var isIdle: Bool = false
-
-    static func read() -> ClaudeStatus? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-status.json")),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-
-        var s = ClaudeStatus()
-        if let cw = json["context_window"] as? [String: Any] {
-            s.contextPercent    = cw["used_percentage"] as? Int ?? 0
-            s.contextWindowSize = cw["context_window_size"] as? Int ?? 0
-            if let cu = cw["current_usage"] as? [String: Any] {
-                s.inputTokens      = cu["input_tokens"] as? Int ?? 0
-                s.outputTokens     = cu["output_tokens"] as? Int ?? 0
-                s.cacheReadTokens  = cu["cache_read_input_tokens"] as? Int ?? 0
-            }
-        }
-        if let m = json["model"] as? [String: Any] { s.model = m["display_name"] as? String ?? "" }
-        if let c = json["cost"] as? [String: Any] {
-            s.costUSD        = c["total_cost_usd"] as? Double ?? 0
-            s.totalDurationMs = c["total_duration_ms"] as? Int ?? 0
-            s.linesAdded     = c["total_lines_added"] as? Int ?? 0
-            s.linesRemoved   = c["total_lines_removed"] as? Int ?? 0
-        }
-        if let rl = json["rate_limits"] as? [String: Any] {
-            s.rate5h = Int((rl["five_hour"] as? [String: Any])?["used_percentage"] as? Double ?? 0)
-            s.rate7d = Int((rl["seven_day"] as? [String: Any])?["used_percentage"] as? Double ?? 0)
-        }
-        if let ws = json["workspace"] as? [String: Any] {
-            s.project = ((ws["current_dir"] as? String ?? "") as NSString).lastPathComponent
-        }
-        s.version = json["version"] as? String ?? ""
-
-        let now = Int(Date().timeIntervalSince1970)
-        if let d = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-activity.json")),
-           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-           let ts = j["ts"] as? Int, now - ts < 10 {
-            s.activity = j["activity"] as? String ?? ""
-            s.activityTool = j["tool"] as? String ?? ""
-        }
-        if let d = try? Data(contentsOf: URL(fileURLWithPath: "/tmp/claudekey-notify.json")),
-           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-           let ts = j["ts"] as? Int, now - ts < 30 {
-            let type = j["type"] as? String ?? ""
-            s.needsAttention = (type == "permission")
-            s.isIdle         = (type == "idle")
-        }
-        return s
-    }
 }
 
 // ── APP DELEGATE ───────────────────────────────────────
@@ -874,7 +701,12 @@ class OLEDLEDStrip: NSView {
 }
 
 // ── MAIN ───────────────────────────────────────────────
-let delegate = AppDelegate()
-let app = NSApplication.shared
-app.delegate = delegate
-app.run()
+@main
+enum Main {
+    static func main() {
+        let delegate = AppDelegate()
+        let app = NSApplication.shared
+        app.delegate = delegate
+        app.run()
+    }
+}

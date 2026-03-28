@@ -2,9 +2,9 @@
  * ClaudeKey Pro — Rotary Encoder Driver (EC11)
  *
  * Wiring:
- *   GPIO1 → CLK (A)
- *   GPIO2 → DT  (B)
- *   GPIO3 → SW  (button)
+ *   GPIO38 → CLK (A)
+ *   GPIO39 → DT  (B)
+ *   GPIO3  → SW  (button)
  *   GND   → GND
  *   (internal pull-ups used)
  */
@@ -12,8 +12,8 @@
 #pragma once
 #ifdef CLAUDEKEY_PRO
 
-static const uint8_t ENC_CLK = 1;
-static const uint8_t ENC_DT  = 2;
+static const uint8_t ENC_CLK = 38;
+static const uint8_t ENC_DT  = 39;
 static const uint8_t ENC_SW  = 3;
 
 static volatile int encoderPos = 0;

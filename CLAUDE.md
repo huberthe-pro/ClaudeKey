@@ -1,6 +1,6 @@
 # ClaudeKey
 
-Agentic Coding 控制面板 — ESP32-S3 键盘 + I2S 麦克风 + LED/TFT + macOS 模拟器。
+Agentic Coding 控制面板 — ESP32-S3 键盘 + I2S 麦克风 + LED/OLED + macOS 模拟器。
 
 两个版本: **Lite** (入门) 和 **Pro** (完整体验)。
 
@@ -9,7 +9,7 @@ Agentic Coding 控制面板 — ESP32-S3 键盘 + I2S 麦克风 + LED/TFT + macO
 | | Lite | Pro |
 |---|---|---|
 | 按键 | 6 键 Cherry MX | 6 核心 + 4 扩展 |
-| 显示 | WS2812B LED 灯带 | ST7789 1.3" 彩色 TFT |
+| 显示 | WS2812B LED 灯带 | SSD1309 2.42" OLED (128x64) |
 | 输入 | 按键 | 按键 + EC11 旋转编码器 |
 | 麦克风 | INMP441 | INMP441 |
 | 蜂鸣器 | 有 | 有 |
@@ -23,12 +23,12 @@ Agentic Coding 控制面板 — ESP32-S3 键盘 + I2S 麦克风 + LED/TFT + macO
 ESP32-S3 ─────────────────────────────────────────→ macOS Terminal
   keys              │
   INMP441 mic       │ F13 (PTT button)
-  LED/TFT           └──────→ ClaudeKey.app ──CGEvent──→ WisprFlow
-                                  │                      (uses ClaudeKey mic)
+  LED/OLED          └──────→ ClaudeKey.app ──CGEvent──→ STT (Apple)
+                                  │
                                   │
 Claude Code ──status hook JSON──→ scripts/claude-status-hook
                                   │
-                                  └──serial──→ ESP32-S3 LED/TFT
+                                  └──serial──→ ESP32-S3 LED/OLED
 ```
 
 ## Hardware Wiring
@@ -54,22 +54,22 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
   GND ────── - (ground)
 ```
 
-### Pro (adds TFT + encoder + extra keys)
+### Pro (adds OLED + encoder + extra keys)
 
 ```
-  ST7789 1.3" TFT (SPI)          Rotary Encoder (EC11)
+  SSD1309 2.42" OLED (I2C)       Rotary Encoder (EC11)
   ──────────────────────          ─────────────────────
-  GPIO10 ─── CS                   GPIO1 ─── CLK (A)
-  GPIO11 ─── DC                   GPIO2 ─── DT  (B)
-  GPIO12 ─── RST                  GPIO3 ─── SW  (button)
-  GPIO13 ─── SDA (MOSI)           GND ────── GND
-  GPIO14 ─── SCL (SCK)
-  3.3V ───── VCC / BL             Extra Keys (Pro)
-  GND ────── GND                  ─────────────────
-                                  GPIO8  ── [Undo]     ── GND
-                                  GPIO9  ── [Interrupt] ── GND
-                                  GPIO18 ── [Tab]       ── GND
-                                  GPIO21 ── [Paste]     ── GND
+  GPIO1  ─── SDA                  GPIO38 ─── CLK (A)
+  GPIO2  ─── SCL                  GPIO39 ─── DT  (B)
+  3.3V ───── VCC                  GPIO3  ─── SW  (button)
+  GND ────── GND                  GND ────── GND
+
+  Extra Keys (Pro)
+  ─────────────────
+  GPIO8  ── [Undo]     ── GND
+  GPIO9  ── [Interrupt] ── GND
+  GPIO18 ── [Tab]       ── GND
+  GPIO21 ── [Paste]     ── GND
 ```
 
 ## Key Behavior
@@ -104,13 +104,19 @@ Claude Code ──status hook JSON──→ scripts/claude-status-hook
 
 ## Serial Protocol
 
-| Prefix | Direction | Description |
-|--------|-----------|-------------|
-| `L:` | host→device | LED strip color/mode |
-| `D:` | host→device | TFT display data (Pro) |
-| `A:` | host→device | Audio/buzzer command |
-| `K:` | device→host | Key press report |
-| `E:` | device→host | Encoder event (Pro) |
+| Prefix | Direction | Description | Example |
+|--------|-----------|-------------|---------|
+| `L:` | host→device | LED color[,mode] | `L:green` or `L:red,k` |
+| `D:` | host→device | OLED display data (Pro) | `D:45,12,3,$1.23,340,Working,Writing tests` |
+| `A:` | host→device | Buzzer alert | `A:accept` or `A:alert` |
+| `K:` | device→host | Key press event | `K:accept` or `K:ptt` |
+| `E:` | device→host | Encoder event (Pro) | `E:cw` or `E:press` |
+
+Colors: green, blue, yellow, red, white, purple, off
+Modes: b=breathe, s=solid, k=blink
+Alerts: accept, reject, alert, ptt_start, ptt_stop
+Keys: accept, reject, up, down, ptt, spare, undo, interrupt, tab, paste
+Encoder: cw, ccw, press
 
 ## LED Status (via Claude Code status hook)
 
@@ -145,13 +151,9 @@ pio run -e pro --target upload
 cd app/lite && ./build.sh
 ./ClaudeKeyLite &
 
-# Pro version (TFT preview + encoder + extra buttons)
+# Pro version (OLED preview + encoder + extra buttons)
 cd app/pro && ./build.sh
 ./ClaudeKeyPro &
-
-# Legacy standalone app (original PTT-only)
-cd app && ./build.sh
-./ClaudeKey &
 ```
 
 ### 3. Install Claude Code status hook
@@ -161,9 +163,10 @@ cd app && ./build.sh
 # "statusline": { "type": "command", "command": "/path/to/ClaudeKey/scripts/claude-status-hook" }
 ```
 
-### 4. Configure WisprFlow mic input
+### 4. PTT 使用本机麦克风
 
-In WisprFlow settings, select "ClaudeKey" (or the ESP32-S3 USB audio device) as the microphone input.
+PTT 语音使用 macOS 本机麦克风 + Apple SFSpeechRecognizer, 不需要额外配置。
+ESP32 上的 INMP441 麦克风为未来 BLE 无线版本预留。
 
 ## PTT 语音识别说明
 
@@ -192,6 +195,8 @@ ClaudeKey/
 │           ├── display.h     SSD1309 2.42" OLED driver (Pro only)
 │           └── encoder.h     EC11 rotary encoder (Pro only)
 ├── app/
+│   ├── shared/
+│   │   └── Shared.swift          Common: SpeechEngine, HID output, ClaudeStatus, Terminal detection
 │   ├── lite/
 │   │   ├── ClaudeKeyLite.swift   Lite simulator — 6 buttons + LED bars
 │   │   └── build.sh
@@ -213,13 +218,20 @@ ClaudeKey/
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| 高 | Terminal 前台检测 | Accept 键发送前检查前台 app 是否为 Terminal/iTerm，防止误触。用 `NSWorkspace.shared.frontmostApplication.bundleIdentifier` |
-| 中 | Auto-Accept 可靠性 | 验证直发 Enter 的时机准确性，考虑降级为"按住持续发送"模式（500ms 间隔）|
+| 高 | Host Serial 写入 | macOS app 通过串口发送 L:/D: 命令到 ESP32, 硬件 LED/OLED 才能显示状态 |
+| 中 | Auto-Accept 可靠性 | 验证直发 Enter 的时机准确性, 需要 Terminal 前台检测作为前置条件 |
+| 中 | 会话级路由 | 区分同一 Terminal 中多个 tab/session, 绑定具体 Claude Code 会话 |
 
 ### 已完成
 
 | 功能 | 完成时间 |
 |------|---------|
+| 公共 Swift 模块提取 (app/shared/) | 2026-03-28 |
+| Terminal 前台检测 (isTerminalFrontmost) | 2026-03-28 |
+| GPIO 冲突修复 (编码器 → GPIO38/39) | 2026-03-28 |
+| Serial 协议统一 (L:/D:/A:/K:/E:) | 2026-03-28 |
+| Pro 固件集成 (OLED + 编码器 + 额外按键) | 2026-03-28 |
+| 非阻塞蜂鸣器 (millis-based state machine) | 2026-03-28 |
 | Hook 自动修复（Fix Hook 菜单） | 2026-03-27 |
 | Lite / Pro 双版本架构 | 2026-03-27 |
 | OLED 2.42" 128x64 显示方案 | 2026-03-27 |
