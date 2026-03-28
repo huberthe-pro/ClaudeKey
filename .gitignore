@@ -1,22 +1,22 @@
-# Build artifacts
-app/ClaudeKey
-app/ClaudeKeySoft
+# ── Build artifacts ────────────────────────────────────
+app/lite/ClaudeKeyLite
+app/pro/ClaudeKeyPro
 *.o
 *.dSYM/
 
-# PlatformIO
+# ── PlatformIO ─────────────────────────────────────────
 firmware/.pio/
 firmware/.vscode/
 
-# macOS
-.DS_Store
-
-# Python
+# ── Python ─────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.pyo
 
-# IDE
+# ── macOS ──────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+
+# ── IDE ────────────────────────────────────────────────
 .vscode/
 .idea/
-app/lite/ClaudeKeyLite
-app/pro/ClaudeKeyPro

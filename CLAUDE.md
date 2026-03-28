@@ -232,26 +232,48 @@ export CLAUDEKEY_WHISPER_MODEL="mlx-community/whisper-small"
 ## Project Structure
 
 ```
-firmware/
-  platformio.ini          PlatformIO config (lite + pro envs)
-  src/
-    main.cpp              Core firmware (keys, mic, LED, serial)
-    pro/
-      display.h           ST7789 TFT driver (Pro only)
-      encoder.h           EC11 rotary encoder (Pro only)
-app/
-  ClaudeKey.swift         Legacy standalone PTT app
-  ClaudeKeySoft.swift     Legacy soft panel (kept for compat)
-  build.sh / build-soft.sh
-  lite/
-    ClaudeKeyLite.swift   Lite simulator (6 buttons + status bars)
-    build.sh
-  pro/
-    ClaudeKeyPro.swift    Pro simulator (TFT preview + encoder + extras)
-    build.sh
-scripts/
-  claude-status-hook      Claude Code status → LED/TFT serial
+ClaudeKey/
+├── firmware/
+│   ├── platformio.ini        PlatformIO (envs: lite / pro)
+│   └── src/
+│       ├── main.cpp          Core firmware — keys, mic, LED, serial
+│       └── pro/
+│           ├── display.h     SSD1309 2.42" OLED driver (Pro only)
+│           └── encoder.h     EC11 rotary encoder (Pro only)
+├── app/
+│   ├── lite/
+│   │   ├── ClaudeKeyLite.swift   Lite simulator — 6 buttons + LED bars
+│   │   └── build.sh
+│   └── pro/
+│       ├── ClaudeKeyPro.swift    Pro simulator — OLED + encoder + extras
+│       └── build.sh
+├── scripts/
+│   ├── claude-status-hook    Claude Code status → LED/OLED (required)
+│   ├── claude-notify-hook    Approval/idle notifications
+│   ├── claude-tool-hook      Tool activity logging
+│   ├── claude-status-dump    Debug: dump last status JSON
+│   └── whisper-stt           mlx-whisper STT backend (optional)
+└── docs/
+    └── claude-code-hooks-reference.md
 ```
+
+## Roadmap
+
+### 待实现
+
+| 优先级 | 功能 | 说明 |
+|--------|------|------|
+| 高 | Terminal 前台检测 | Accept 键发送前检查前台 app 是否为 Terminal/iTerm，防止误触。用 `NSWorkspace.shared.frontmostApplication.bundleIdentifier` |
+| 中 | Auto-Accept 可靠性 | 验证直发 Enter 的时机准确性，考虑降级为"按住持续发送"模式（500ms 间隔）|
+
+### 已完成
+
+| 功能 | 完成时间 |
+|------|---------|
+| mlx-whisper STT backend（中英混合识别） | 2026-03-27 |
+| Hook 自动修复（Fix Hook 菜单） | 2026-03-27 |
+| Lite / Pro 双版本架构 | 2026-03-27 |
+| OLED 2.42" 128x64 显示方案 | 2026-03-27 |
 
 ## BOM (Bill of Materials)
 
