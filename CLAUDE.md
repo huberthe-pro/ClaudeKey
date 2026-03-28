@@ -165,6 +165,27 @@ cd app && ./build.sh
 
 In WisprFlow settings, select "ClaudeKey" (or the ESP32-S3 USB audio device) as the microphone input.
 
+## PTT 语音识别说明
+
+PTT 按钮使用 macOS 原生 `SFSpeechRecognizer`，语言跟随系统设置：
+
+```
+Locale.current (macOS 系统语言)
+    └─ 不可用 → zh-CN
+        └─ 不可用 → en-US (最终兜底)
+```
+
+**支持中英文混合输入**：macOS 系统语言设为「简体中文」时，可以直接说中文或中英混合句子，识别结果会自动输入到当前焦点窗口。
+
+**常见问题**：
+| 现象 | 原因 | 解决 |
+|------|------|------|
+| 只识别英文 | macOS 系统语言是 English | 系统偏好 → 语言与地区 → 简体中文置顶 |
+| PTT 按下无反应 | 未授权麦克风 / 语音识别权限 | 系统设置 → 隐私与安全性 → 语音识别 / 麦克风 |
+| 识别结果乱码 | 语言模型不匹配 | 重启 App 让 Locale 重新加载 |
+
+> **注意**：`SFSpeechRecognizer` 每次只能绑定一个 locale，不支持同时加载多语言模型。中英混合识别依赖 macOS 的「中文（简体）」模型本身的英文兼容能力。
+
 ## Project Structure
 
 ```
