@@ -223,6 +223,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer?
     var blinkState = false
     var lastActivity = ""
+    var stripMode = ""  // tracks current animation to avoid restarting every poll
     var alwaysAccept = false
     var alwaysAcceptCount = 0
     var encoderPos = 0
@@ -479,11 +480,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applyStripAnimation(color: NSColor, mode: String) {
+        guard let layer = statusStrip.layer else { return }
+        let key = "\(mode)-\(color.description)"
+        guard key != stripMode else { return }
+        stripMode = key
+        layer.removeAllAnimations()
+        layer.backgroundColor = color.cgColor
+        layer.opacity = 1.0
+        switch mode {
+        case "b":
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 1.0; anim.toValue = 0.12
+            anim.duration = 1.8; anim.autoreverses = true
+            anim.repeatCount = .infinity
+            anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(anim, forKey: "breathe")
+        case "k":
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 1.0; anim.toValue = 0.0
+            anim.duration = 0.45; anim.autoreverses = true
+            anim.repeatCount = .infinity
+            anim.timingFunction = CAMediaTimingFunction(name: .linear)
+            layer.add(anim, forKey: "blink")
+        default: break
+        }
+    }
+
     func updateStatus() {
         guard let s = ClaudeStatus.read() else { return }
 
-        // Status strip (synced with LED)
-        statusStrip.layer?.backgroundColor = statusNSColor(for: s).cgColor
+        // Status strip (synced with LED: breathe/blink/solid)
+        applyStripAnimation(color: statusNSColor(for: s), mode: s.ledMode())
 
         headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey Pro" : s.project
 
