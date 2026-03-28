@@ -208,23 +208,36 @@ struct ClaudeStatus {
         return s
     }
 
+    /// Is Claude actively working? (tool activity within last 10 seconds)
+    var isWorking: Bool { !isIdle && !needsAttention && !activity.isEmpty }
+
     /// Convert status to LED color name for Serial protocol
+    ///
+    /// Priority: approval > working > context level > idle
+    ///   - Red blink:    needs approval (action required)
+    ///   - Blue breathe: Claude is working (thinking/running tools)
+    ///   - Green solid:  idle, waiting for input
+    ///   - Yellow solid: context > 50% (caution)
+    ///   - Red solid:    context > 75% (warning)
+    ///   - Red blink:    context > 90% (critical)
     func ledColor() -> String {
         if needsAttention { return "red" }
+        if isWorking { return "blue" }
         if isIdle { return "green" }
-        if contextPercent < 25 { return "green" }
-        if contextPercent < 50 { return "blue" }
+        // No activity signal, fall back to context usage
+        if contextPercent < 50 { return "green" }
         if contextPercent < 75 { return "yellow" }
-        if contextPercent < 90 { return "red" }
-        return "red"  // >90%
+        return "red"
     }
 
     /// Convert status to LED mode for Serial protocol
     func ledMode() -> String {
         if needsAttention { return "k" }  // blink for approval needed
+        if isWorking { return "b" }       // breathe while working
+        if isIdle { return "s" }          // solid when idle
         if contextPercent > 90 { return "k" }  // blink for critical
-        if contextPercent > 75 { return "s" }  // solid for warning
-        return "b"  // breathe for normal
+        if contextPercent > 50 { return "s" }  // solid for caution+
+        return "s"  // solid default
     }
 
     /// Format as D: command for OLED (Pro)

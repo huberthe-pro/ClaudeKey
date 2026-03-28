@@ -120,14 +120,16 @@ Encoder: cw, ccw, press
 
 ## LED Status (via Claude Code status hook)
 
-| Context Usage | Color | Mode |
-|--------------|-------|------|
-| < 25% | Green | Breathe |
-| 25-50% | Blue | Breathe |
-| 50-75% | Yellow | Solid |
-| 75-90% | Red | Solid |
-| > 90% | Red | Blink |
-| PTT active | Purple | Pulse |
+| State | Color | Mode | Trigger |
+|-------|-------|------|---------|
+| Needs approval | Red | Blink | claude-notify-hook: permission |
+| Working | Blue | Breathe | claude-tool-hook: activity within 10s |
+| Idle | Green | Solid | claude-notify-hook: idle |
+| Context 50-75% | Yellow | Solid | context_window.used_percentage |
+| Context > 75% | Red | Solid | context_window.used_percentage |
+| Context > 90% | Red | Blink | context_window.used_percentage |
+| PTT active | Purple | Pulse | Hardware override in firmware |
+| Disconnected | White | Slow breathe | No Serial commands received |
 
 ## Setup
 
