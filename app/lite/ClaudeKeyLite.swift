@@ -696,6 +696,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Show Panel", action: #selector(showPanel), keyEquivalent: "")
         menu.addItem(withTitle: "Hide Panel", action: #selector(hidePanel), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
+        let voiceItem = NSMenuItem(title: "Voice Engine", action: nil, keyEquivalent: "")
+        let voiceMenu = NSMenu()
+        let sysItem = NSMenuItem(title: "System (Apple STT)", action: nil, keyEquivalent: "")
+        sysItem.state = .on
+        voiceMenu.addItem(sysItem)
+        voiceMenu.addItem(NSMenuItem.separator())
+        let otherItem = NSMenuItem(title: "Other…", action: nil, keyEquivalent: "")
+        otherItem.isEnabled = false
+        voiceMenu.addItem(otherItem)
+        voiceItem.submenu = voiceMenu
+        menu.addItem(voiceItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Fix Hook (configure settings.json)", action: #selector(fixHook), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
