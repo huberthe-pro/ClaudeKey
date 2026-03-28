@@ -218,8 +218,7 @@ ClaudeKey/
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| 高 | Host Serial 写入 | macOS app 通过串口发送 L:/D: 命令到 ESP32, 硬件 LED/OLED 才能显示状态 |
-| 中 | Auto-Accept 可靠性 | 验证直发 Enter 的时机准确性, 需要 Terminal 前台检测作为前置条件 |
+| 中 | Auto-Accept 可靠性 | 验证 hook 驱动的 Auto-Accept 在实际使用中的时机准确性 (1秒轮询间隔) |
 | 中 | 会话级路由 | 区分同一 Terminal 中多个 tab/session, 绑定具体 Claude Code 会话 |
 
 ### 已完成

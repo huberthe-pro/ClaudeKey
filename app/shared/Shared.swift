@@ -6,7 +6,6 @@
  - Keyboard output: typeString, sendKey
  - NonActivatingButton / ControlPanel: floating panel controls
  - ClaudeStatus: reads Claude Code hook JSON from /tmp/
- - Terminal detection: isTerminalFrontmost()
  - SerialBridge: connects to ESP32 via USB serial, sends L:/D: commands
 */
 
@@ -114,23 +113,6 @@ func sendKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
     down.post(tap: .cgAnnotatedSessionEventTap)
     usleep(10000)
     up.post(tap: .cgAnnotatedSessionEventTap)
-}
-
-// ── TERMINAL DETECTION ─────────────────────────────────
-/// Check if the frontmost app is a terminal (Terminal.app or iTerm2).
-/// Used to prevent Accept/Reject from firing into non-terminal apps.
-private let terminalBundleIDs: Set<String> = [
-    "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "io.alacritty",
-    "com.github.wez.wezterm",
-    "com.mitchellh.ghostty",
-]
-
-func isTerminalFrontmost() -> Bool {
-    guard let app = NSWorkspace.shared.frontmostApplication,
-          let bundleID = app.bundleIdentifier else { return false }
-    return terminalBundleIDs.contains(bundleID)
 }
 
 // ── NON-ACTIVATING CONTROLS ────────────────────────────
