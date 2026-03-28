@@ -157,29 +157,39 @@ struct ClaudeStatus {
         let now = Date()
         var results: [(String, Date)] = []
 
-        // Session-specific files: claudekey-{sid}-status.json
+        var seenSids = Set<String>()
+
         if let items = try? fm.contentsOfDirectory(atPath: "/tmp") {
+            // 1. Session-specific status files (< 30 min)
             for name in items where name.hasPrefix("claudekey-") && name.hasSuffix("-status.json") {
                 let path = "/tmp/\(name)"
                 guard let attr = try? fm.attributesOfItem(atPath: path),
                       let mod = attr[.modificationDate] as? Date,
-                      now.timeIntervalSince(mod) < 300 else { continue }
+                      now.timeIntervalSince(mod) < 1800 else { continue }
                 let sid = String(name.dropFirst("claudekey-".count).dropLast("-status.json".count))
-                results.append((sid, mod))
+                if seenSids.insert(sid).inserted { results.append((sid, mod)) }
+            }
+            // 2. Sessions with recent activity (< 10 min) but no status file yet
+            for name in items where name.hasPrefix("claudekey-") && name.hasSuffix("-activity.json") {
+                let path = "/tmp/\(name)"
+                guard let attr = try? fm.attributesOfItem(atPath: path),
+                      let mod = attr[.modificationDate] as? Date,
+                      now.timeIntervalSince(mod) < 600 else { continue }
+                let sid = String(name.dropFirst("claudekey-".count).dropLast("-activity.json".count))
+                if seenSids.insert(sid).inserted { results.append((sid, mod)) }
             }
         }
 
-        // Legacy fallback: extract session_id from claudekey-status.json
+        // 3. Legacy fallback: extract session_id from claudekey-status.json
         if results.isEmpty {
             let legacyPath = "/tmp/claudekey-status.json"
             if let attr = try? fm.attributesOfItem(atPath: legacyPath),
                let mod = attr[.modificationDate] as? Date,
-               now.timeIntervalSince(mod) < 300,
+               now.timeIntervalSince(mod) < 1800,
                let data = try? Data(contentsOf: URL(fileURLWithPath: legacyPath)),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let fullSid = json["session_id"] as? String {
                 let sid = String(fullSid.prefix(8))
-                // Copy to session-specific file so future reads are consistent
                 try? data.write(to: URL(fileURLWithPath: "/tmp/claudekey-\(sid)-status.json"))
                 results.append((sid, mod))
             }
