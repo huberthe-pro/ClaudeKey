@@ -40,6 +40,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Stats
     var statsLabel: NSTextField!
+    var debugLabel: NSTextField!
 
     // Activity log
     var logView: NSScrollView!
@@ -318,8 +319,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statsLabel.frame = NSRect(x: pad, y: y, width: w, height: 12)
         cv.addSubview(statsLabel)
 
+        // ── Debug / Hook status ──
+        y -= 4
+        y -= 24
+        debugLabel = makeLabel("", size: 9, weight: .regular, color: NSColor(white: 0.38, alpha: 1))
+        debugLabel.frame = NSRect(x: pad, y: y, width: w, height: 24)
+        debugLabel.maximumNumberOfLines = 2
+        debugLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+        cv.addSubview(debugLabel)
+
         // ── Divider 2 ──
-        y -= 6
+        y -= 4
         addDivider(cv, y: y)
         y -= 6
 
@@ -499,6 +509,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let dur = s.totalDurationMs / 1000
         let cacheK = s.cacheReadTokens / 1000
         statsLabel.stringValue = "\(cost) | \(dur)s | +\(s.linesAdded)/-\(s.linesRemoved) lines | cache: \(cacheK)k"
+
+        // Debug: hook file ages + computed state
+        let now = Int(Date().timeIntervalSince1970)
+        func fileAge(_ path: String) -> String {
+            guard let attr = try? FileManager.default.attributesOfItem(atPath: path),
+                  let mod = attr[.modificationDate] as? Date else { return "missing" }
+            let age = now - Int(mod.timeIntervalSince1970)
+            return "\(age)s ago"
+        }
+        func fileSnippet(_ path: String) -> String {
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)), !d.isEmpty,
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+                return "(empty)"
+            }
+            if let act = j["activity"] as? String { return "\"\(act)\"" }
+            if let t = j["type"] as? String { return "type=\(t)" }
+            return "(ok)"
+        }
+        let statusAge  = fileAge("/tmp/claudekey-status.json")
+        let actAge     = fileAge("/tmp/claudekey-activity.json")
+        let actSnip    = fileSnippet("/tmp/claudekey-activity.json")
+        let notifySnip = fileSnippet("/tmp/claudekey-notify.json")
+        let state = "attn=\(s.needsAttention) work=\(s.isWorking) idle=\(s.isIdle) → \(s.ledColor())/\(s.ledMode())"
+        debugLabel.stringValue = "status:\(statusAge)  act:\(actAge) \(actSnip)\nnotify:\(notifySnip)  \(state)"
 
         // Activity log (only add if new)
         if !s.activity.isEmpty && s.activity != lastActivity {

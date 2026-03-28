@@ -218,6 +218,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var logView: NSScrollView!
     var logText: NSTextView!
     var activityLog: [(Date, String, NSColor)] = []
+    var debugLabel: NSTextField!
 
     // State
     var pollTimer: Timer?
@@ -389,7 +390,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         y -= 8
 
-        // ── Section 5: Divider + Activity ──
+        // ── Section 5: Debug + Divider + Activity ──
+        addDivider(cv, y: y - 2)
+        y -= 8
+
+        y -= 24
+        debugLabel = label("", 9, .regular, NSColor(white: 0.38, alpha: 1))
+        debugLabel.frame = NSRect(x: pad, y: y, width: w, height: 24)
+        debugLabel.maximumNumberOfLines = 2
+        debugLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+        cv.addSubview(debugLabel)
+
+        y -= 4
         addDivider(cv, y: y - 2)
         y -= 8
 
@@ -514,6 +526,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         applyStripAnimation(color: statusNSColor(for: s), mode: s.ledMode())
 
         headerLabel.stringValue = s.project.isEmpty ? "ClaudeKey Pro" : s.project
+
+        // Debug: hook file ages + computed state
+        let now = Int(Date().timeIntervalSince1970)
+        func fileAge(_ path: String) -> String {
+            guard let attr = try? FileManager.default.attributesOfItem(atPath: path),
+                  let mod = attr[.modificationDate] as? Date else { return "missing" }
+            let age = now - Int(mod.timeIntervalSince1970)
+            return "\(age)s ago"
+        }
+        func fileSnippet(_ path: String) -> String {
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)), !d.isEmpty,
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+                return "(empty)"
+            }
+            if let act = j["activity"] as? String { return "\"\(act)\"" }
+            if let t = j["type"] as? String { return "type=\(t)" }
+            return "(ok)"
+        }
+        let statusAge  = fileAge("/tmp/claudekey-status.json")
+        let actAge     = fileAge("/tmp/claudekey-activity.json")
+        let actSnip    = fileSnippet("/tmp/claudekey-activity.json")
+        let notifySnip = fileSnippet("/tmp/claudekey-notify.json")
+        let state = "attn=\(s.needsAttention) work=\(s.isWorking) idle=\(s.isIdle) → \(s.ledColor())/\(s.ledMode())"
+        debugLabel.stringValue = "status:\(statusAge)  act:\(actAge) \(actSnip)\nnotify:\(notifySnip)  \(state)"
 
         // Feed OLED
         let tokK  = (s.inputTokens + s.outputTokens) / 1000
