@@ -150,24 +150,42 @@ struct ClaudeStatus {
     var needsAttention: Bool = false
     var isIdle: Bool = false
 
-    /// Scan /tmp/ for all active Claude Code sessions (those with a status file < 5 min old)
+    /// Scan /tmp/ for all active Claude Code sessions (those with a status file < 5 min old).
+    /// Falls back to legacy /tmp/claudekey-status.json if no session-specific files exist.
     static func availableSessions() -> [String] {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(atPath: "/tmp") else { return [] }
         let now = Date()
-        return items
-            .filter { $0.hasPrefix("claudekey-") && $0.hasSuffix("-status.json") }
-            .compactMap { name -> (String, Date)? in
+        var results: [(String, Date)] = []
+
+        // Session-specific files: claudekey-{sid}-status.json
+        if let items = try? fm.contentsOfDirectory(atPath: "/tmp") {
+            for name in items where name.hasPrefix("claudekey-") && name.hasSuffix("-status.json") {
                 let path = "/tmp/\(name)"
                 guard let attr = try? fm.attributesOfItem(atPath: path),
                       let mod = attr[.modificationDate] as? Date,
-                      now.timeIntervalSince(mod) < 300 else { return nil }
-                // extract session id: claudekey-{sid}-status.json
-                let parts = name.dropFirst("claudekey-".count).dropLast("-status.json".count)
-                return (String(parts), mod)
+                      now.timeIntervalSince(mod) < 300 else { continue }
+                let sid = String(name.dropFirst("claudekey-".count).dropLast("-status.json".count))
+                results.append((sid, mod))
             }
-            .sorted { $0.1 > $1.1 }  // most recently active first
-            .map { $0.0 }
+        }
+
+        // Legacy fallback: extract session_id from claudekey-status.json
+        if results.isEmpty {
+            let legacyPath = "/tmp/claudekey-status.json"
+            if let attr = try? fm.attributesOfItem(atPath: legacyPath),
+               let mod = attr[.modificationDate] as? Date,
+               now.timeIntervalSince(mod) < 300,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: legacyPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let fullSid = json["session_id"] as? String {
+                let sid = String(fullSid.prefix(8))
+                // Copy to session-specific file so future reads are consistent
+                try? data.write(to: URL(fileURLWithPath: "/tmp/claudekey-\(sid)-status.json"))
+                results.append((sid, mod))
+            }
+        }
+
+        return results.sorted { $0.1 > $1.1 }.map { $0.0 }
     }
 
     static func read(session: String? = nil) -> ClaudeStatus? {
