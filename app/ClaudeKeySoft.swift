@@ -29,7 +29,10 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
 
     override init() {
         super.init()
-        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        // Use system locale → supports zh-CN/en-US mixed input
+        speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
 
     func requestPermission(completion: @escaping (Bool) -> Void) {

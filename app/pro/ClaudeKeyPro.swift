@@ -34,7 +34,10 @@ class SpeechEngine: NSObject, AVAudioRecorderDelegate {
     var onError:  ((String) -> Void)?
 
     func requestPermission(completion: @escaping (Bool) -> Void) {
-        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        // Use system locale → supports zh-CN/en-US mixed input
+        speechRecognizer = SFSpeechRecognizer(locale: Locale.current)
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+            ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async { completion(status == .authorized) }
         }
