@@ -592,10 +592,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if let t = j["type"] as? String { return "type=\(t)" }
             return "(ok)"
         }
-        let statusAge  = fileAge("/tmp/claudekey-status.json")
-        let actAge     = fileAge("/tmp/claudekey-activity.json")
-        let actSnip    = fileSnippet("/tmp/claudekey-activity.json")
-        let notifySnip = fileSnippet("/tmp/claudekey-notify.json")
+        let pfx = s.sessionId.isEmpty ? "" : "/tmp/claudekey-\(s.sessionId)"
+        let statusAge  = fileAge(pfx.isEmpty ? "/tmp/claudekey-status.json"   : "\(pfx)-status.json")
+        let actAge     = fileAge(pfx.isEmpty ? "/tmp/claudekey-activity.json" : "\(pfx)-activity.json")
+        let actSnip    = fileSnippet(pfx.isEmpty ? "/tmp/claudekey-activity.json" : "\(pfx)-activity.json")
+        let notifySnip = fileSnippet(pfx.isEmpty ? "/tmp/claudekey-notify.json"   : "\(pfx)-notify.json")
         let state = "attn=\(s.needsAttention) work=\(s.isWorking) idle=\(s.isIdle) → \(s.ledColor())/\(s.ledMode())"
         debugLabel.stringValue = "status:\(statusAge)  act:\(actAge) \(actSnip)\nnotify:\(notifySnip)  \(state)"
 
@@ -611,11 +612,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Needs attention
         if s.needsAttention {
+            // Clear session-specific notify file to prevent re-trigger
+            let notifyPath = s.sessionId.isEmpty
+                ? "/tmp/claudekey-notify.json"
+                : "/tmp/claudekey-\(s.sessionId)-notify.json"
             if alwaysAccept {
-                // Auto-accept: send Enter immediately
                 alwaysAcceptCount += 1
                 sendKey(36)
-                try? "".write(toFile: "/tmp/claudekey-notify.json", atomically: true, encoding: .utf8)
+                try? "".write(toFile: notifyPath, atomically: true, encoding: .utf8)
                 logActivity("Auto-accept #\(alwaysAcceptCount): Enter", color: .systemGreen)
                 return
             }
@@ -623,9 +627,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if blinkState {
                 logActivity(">>> NEEDS APPROVAL <<<", color: .systemYellow)
             }
+            // High-contrast blink: bright orange vs dark background
             acceptButton.layer?.backgroundColor = blinkState
-                ? NSColor.systemGreen.cgColor
-                : NSColor(red: 0.15, green: 0.3, blue: 0.15, alpha: 1).cgColor
+                ? NSColor.systemOrange.cgColor
+                : NSColor(white: 0.18, alpha: 1).cgColor
             statusItem.button?.title = blinkState ? "⚠️" : "⌨"
         } else if s.isIdle {
             if lastActivity != "_idle" {
