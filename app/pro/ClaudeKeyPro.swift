@@ -383,6 +383,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var alwaysAcceptCount = 0
     var encoderPos = 0
 
+    // Hook fix state
+    var pendingHookScript: String?
+    var pendingSettingsPath: String?
+
     // Panel dimensions
     let panelW: CGFloat = 400
     let panelH: CGFloat = 560
@@ -667,21 +671,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // ── HOOK CHECK ─────────────────────────────────────
     func checkHookStatus() {
-        let bin = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
+        let bin  = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
+        // Pro binary lives at <root>/app/pro/ClaudeKeyPro
         let root = bin.deletingLastPathComponent().deletingLastPathComponent()
                       .deletingLastPathComponent().path
         let hook = root + "/scripts/claude-status-hook"
         let cfg  = NSHomeDirectory() + "/.claude/settings.json"
         let fm   = FileManager.default
-        guard fm.fileExists(atPath: hook) else { log("Hook missing", .systemRed); return }
-        guard fm.isExecutableFile(atPath: hook) else { log("Hook not executable", .systemRed); return }
+
+        guard fm.fileExists(atPath: hook) else {
+            log("✗ Hook not found: \(hook)", .systemRed); return
+        }
+        if !fm.isExecutableFile(atPath: hook) {
+            log("✗ Hook not executable — fixing…", .systemOrange)
+            let _ = try? Process.run(URL(fileURLWithPath: "/bin/chmod"), arguments: ["+x", hook])
+            log("  chmod +x applied", .systemGreen)
+        }
         guard let d = fm.contents(atPath: cfg),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let sl = j["statusLine"] as? [String: Any],
-              let cmd = sl["command"] as? String
-        else { log("Hook not in settings.json", .systemOrange); return }
-        log(cmd.contains("claude-status-hook") ? "Status hook linked ✓" : "Hook mismatch",
-            cmd.contains("claude-status-hook") ? .systemGreen : .systemOrange)
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            log("✗ ~/.claude/settings.json not found", .systemRed)
+            log("  Run Claude Code at least once first", .systemRed)
+            return
+        }
+        let sl  = j["statusLine"] as? [String: Any]
+        let cmd = sl?["command"] as? String ?? "(not set)"
+
+        if cmd.contains("claude-status-hook") {
+            log("✓ Hook linked: \(hook)", .systemGreen)
+        } else {
+            log("✗ Hook mismatch", .systemOrange)
+            log("  Current:  \(cmd)", .systemOrange)
+            log("  → Menu → Fix Hook to auto-configure", .systemYellow)
+            pendingHookScript   = hook
+            pendingSettingsPath = cfg
+        }
+    }
+
+    @objc func fixHook() {
+        guard let hook = pendingHookScript,
+              let cfgPath = pendingSettingsPath else {
+            log("Hook already configured ✓", .systemGreen); return
+        }
+        let fm = FileManager.default
+        guard let d = fm.contents(atPath: cfgPath),
+              var j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            log("Cannot read settings.json", .systemRed); return
+        }
+        j["statusLine"] = ["type": "command", "command": hook]
+        guard let out = try? JSONSerialization.data(withJSONObject: j,
+                                                    options: [.prettyPrinted, .sortedKeys]) else {
+            log("Cannot encode settings.json", .systemRed); return
+        }
+        do {
+            try out.write(to: URL(fileURLWithPath: cfgPath))
+            log("✓ Hook configured!", .systemGreen)
+            log("  Restart Claude Code to apply", .systemGreen)
+            pendingHookScript = nil; pendingSettingsPath = nil
+        } catch {
+            log("✗ Write failed: \(error.localizedDescription)", .systemRed)
+        }
     }
 
     // ── MENUBAR ────────────────────────────────────────
@@ -693,6 +741,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         m.addItem(.separator())
         m.addItem(withTitle: "Show Panel", action: #selector(showPanel), keyEquivalent: "")
         m.addItem(withTitle: "Hide Panel", action: #selector(hidePanel), keyEquivalent: "")
+        m.addItem(.separator())
+        m.addItem(withTitle: "Fix Hook (configure settings.json)", action: #selector(fixHook), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
         statusItem.menu = m

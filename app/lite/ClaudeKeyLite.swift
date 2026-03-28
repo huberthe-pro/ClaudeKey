@@ -271,6 +271,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var alwaysAcceptCount = 0
     var alwaysAcceptButton: NonActivatingButton!
 
+    // Hook fix state
+    var pendingHookScript: String?
+    var pendingSettingsPath: String?
+
     let panelW: CGFloat = 360
     let panelH: CGFloat = 480
 
@@ -306,39 +310,78 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func checkHookStatus() {
-        // Resolve project root from the binary's location (app/ClaudeKeySoft)
         let binaryPath = ProcessInfo.processInfo.arguments[0]
-        let binaryURL = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath()
-        let projectRoot = binaryURL.deletingLastPathComponent().deletingLastPathComponent().path
-        let hookScript = projectRoot + "/scripts/claude-status-hook"
+        let binaryURL  = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath()
+        // Lite binary lives at <root>/app/lite/ClaudeKeyLite
+        let projectRoot = binaryURL.deletingLastPathComponent()
+                                   .deletingLastPathComponent()
+                                   .deletingLastPathComponent().path
+        let hookScript  = projectRoot + "/scripts/claude-status-hook"
         let settingsPath = NSHomeDirectory() + "/.claude/settings.json"
-
-        // Check hook script exists and is executable
         let fm = FileManager.default
+
+        // 1. Hook script exists?
         guard fm.fileExists(atPath: hookScript) else {
-            logActivity("Hook script missing: scripts/claude-status-hook", color: .systemRed)
+            logActivity("✗ Hook not found: \(hookScript)", color: .systemRed)
             return
         }
-        guard fm.isExecutableFile(atPath: hookScript) else {
-            logActivity("Hook script not executable", color: .systemRed)
-            return
+        // 2. Executable?
+        if !fm.isExecutableFile(atPath: hookScript) {
+            logActivity("✗ Hook not executable — fixing…", color: .systemOrange)
+            let _ = try? Process.run(URL(fileURLWithPath: "/bin/chmod"),
+                                     arguments: ["+x", hookScript])
+            logActivity("  chmod +x applied", color: .systemGreen)
         }
-
-        // Check settings.json links to our hook
+        // 3. settings.json exists?
         guard let data = fm.contents(atPath: settingsPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let statusLine = json["statusLine"] as? [String: Any],
-              let command = statusLine["command"] as? String else {
-            logActivity("Hook not configured in settings.json", color: .systemOrange)
-            logActivity("  Set statusLine.command → claude-status-hook", color: .systemOrange)
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            logActivity("✗ ~/.claude/settings.json not found", color: .systemRed)
+            logActivity("  Run Claude Code at least once first", color: .systemRed)
             return
         }
+        // 4. Check current statusLine.command
+        let sl  = json["statusLine"] as? [String: Any]
+        let cmd = sl?["command"] as? String ?? "(not set)"
 
-        if command.contains("claude-status-hook") {
-            logActivity("Status hook linked ✓", color: .systemGreen)
+        if cmd.contains("claude-status-hook") {
+            logActivity("✓ Hook linked: \(hookScript)", color: .systemGreen)
         } else {
-            logActivity("Hook mismatch: \(command)", color: .systemOrange)
-            logActivity("  Expected: claude-status-hook", color: .systemOrange)
+            logActivity("✗ Hook mismatch", color: .systemOrange)
+            logActivity("  Current: \(cmd)", color: .systemOrange)
+            logActivity("  → Click 'Fix Hook' in menu to auto-configure", color: .systemYellow)
+            // Store for auto-fix
+            pendingHookScript = hookScript
+            pendingSettingsPath = settingsPath
+        }
+    }
+
+    // Called from menu "Fix Hook"
+    @objc func fixHook() {
+        guard let hook = pendingHookScript,
+              let path = pendingSettingsPath else {
+            logActivity("Hook already configured ✓", color: .systemGreen)
+            return
+        }
+        let fm = FileManager.default
+        guard let data = fm.contents(atPath: path),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            logActivity("Cannot read settings.json", color: .systemRed)
+            return
+        }
+        json["statusLine"] = ["type": "command", "command": hook]
+        guard let newData = try? JSONSerialization.data(withJSONObject: json,
+                                                        options: [.prettyPrinted, .sortedKeys]) else {
+            logActivity("Cannot encode settings.json", color: .systemRed)
+            return
+        }
+        do {
+            try newData.write(to: URL(fileURLWithPath: path))
+            logActivity("✓ Hook configured!", color: .systemGreen)
+            logActivity("  Restart Claude Code to apply", color: .systemGreen)
+            pendingHookScript   = nil
+            pendingSettingsPath = nil
+        } catch {
+            logActivity("✗ Write failed: \(error.localizedDescription)", color: .systemRed)
         }
     }
 
@@ -667,10 +710,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "⌨"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "ClaudeKey Soft v0.2", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "ClaudeKey Lite", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Show Panel", action: #selector(showPanel), keyEquivalent: "")
         menu.addItem(withTitle: "Hide Panel", action: #selector(hidePanel), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "Fix Hook (configure settings.json)", action: #selector(fixHook), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
         statusItem.menu = menu
